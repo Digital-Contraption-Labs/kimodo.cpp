@@ -129,8 +129,8 @@ std::expected<motion_data, std::string> model::generate_text_sequence(
     embeddings.reserve(segments.size());
     for (size_t index=0; index<segments.size(); ++index) {
         const auto &segment=segments[index];
-        if (segment.prompt.empty() || segment.frames < 2 || segment.frames > 300)
-            return std::unexpected("each sequence segment must contain a prompt and have 2..300 frames");
+        if (segment.prompt.empty() || segment.frames < 2 || segment.frames > 360)
+            return std::unexpected("each sequence segment must contain a prompt and have 2..360 frames");
         if (index && transition_frames >= segment.frames) return std::unexpected("transition must be shorter than every following segment");
         auto embedding=impl_->text->encode(segment.prompt);
         if (!embedding) return std::unexpected(embedding.error());

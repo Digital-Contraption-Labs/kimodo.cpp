@@ -25,14 +25,19 @@ namespace kimodo::detail {
 namespace {
 
 void configure_vulkan_f32_parity() noexcept {
-#if defined(__unix__)
     // Kimodo's reference model is F32.  Current Vulkan cooperative-matrix
     // paths convert F32 inputs to FP16 on this GPU, which breaks parity.
     // Keep callers free to supply their own stricter environment, but make
     // the correct reference-first path the default.
+#if defined(__unix__)
     setenv("GGML_VK_DISABLE_COOPMAT", "1", 0);
     setenv("GGML_VK_DISABLE_COOPMAT2", "1", 0);
     setenv("GGML_VK_DISABLE_F16", "1", 0);
+#elif defined(_WIN32)
+    // _putenv_s always overwrites, so preserve any caller-supplied value.
+    for (const char *name : {"GGML_VK_DISABLE_COOPMAT", "GGML_VK_DISABLE_COOPMAT2", "GGML_VK_DISABLE_F16"}) {
+        if (std::getenv(name) == nullptr) _putenv_s(name, "1");
+    }
 #endif
 }
 

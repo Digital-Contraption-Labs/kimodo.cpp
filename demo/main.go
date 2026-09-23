@@ -1,11 +1,17 @@
 // Local Kimodo text-to-motion demo. Generation is serialized so one native
-// process owns Vulkan at a time, while the persistent gallery stays readable.
+// process owns Vulkan at a time, while the in-memory gallery stays readable.
+// The native worker streams each motion back over its stdout; the gallery
+// keeps animations (their raw streams and the GLB built from them) in
+// memory.  By default nothing is written to disk and only the most recent
+// animations are kept (start-server.bat); with -output the gallery also
+// persists to that directory and reloads on the next start (start-demo.bat).
 package main
 
 import (
 	"bufio"
 	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +43,18 @@ var modelUI []byte
 //go:embed assets/localai.png
 var localAILogo []byte
 
+// A prompt segment is 2..12 s: the demo's default is 150 frames (5 s); the
+// model's positions are sinusoidal, so the ceiling is policy, and the native
+// core enforces the same one.  Advertised on /api/models as max_frames so a
+// client (ContraptionFabricator's Clip Editor) sizes its control from it.
+const minSegmentFrames, maxSegmentFrames = 60, 360
+
+// How many finished animations the in-memory gallery keeps (about a quarter
+// of a megabyte each at 360 frames); older ones go.  Queued and running
+// items are never evicted.  Only without -output: a persisted gallery keeps
+// everything, the directory being its history.
+const galleryKeep = 64
+
 type animation struct {
 	ID               string          `json:"id"`
 	Prompt           string          `json:"prompt"`
@@ -50,7 +69,13 @@ type animation struct {
 	TextQuantization string          `json:"text_quantization"`
 	Segments         []promptSegment `json:"segments,omitempty"`
 	TransitionFrames int             `json:"transition_frames,omitempty"`
+	TextCFG          float64         `json:"text_cfg,omitempty"`
 	Progress         string          `json:"progress,omitempty"`
+	// The motion itself, held in memory: the raw streams the viewer plays
+	// and the GLB built from them.  Written to disk only with -output.
+	roots     []float32
+	rotations []float32
+	glb       []byte
 }
 type promptSegment struct {
 	Prompt string `json:"prompt"`
@@ -67,6 +92,7 @@ type motionModel struct {
 	Commercial  bool         `json:"commercial"`
 	Available   bool         `json:"available"`
 	Reason      string       `json:"reason,omitempty"`
+	MaxFrames   int          `json:"max_frames"`
 	Parents     []int        `json:"parents"`
 	Offsets     [][3]float32 `json:"offsets"`
 	Motion      string       `json:"-"`
@@ -81,12 +107,13 @@ type textBundle struct {
 	Path        string `json:"-"`
 }
 type gallery struct {
-	mu                sync.RWMutex
-	items             map[string]*animation
-	output, generator string
-	queue             chan string
-	models            map[string]motionModel
-	textBundles       map[string]textBundle
+	mu          sync.RWMutex
+	items       map[string]*animation
+	output      string // "" = in memory only; else the gallery persists here
+	generator   string
+	queue       chan string
+	models      map[string]motionModel
+	textBundles map[string]textBundle
 }
 
 type generatorSession struct {
@@ -124,26 +151,59 @@ func (session *generatorSession) close() {
 	_ = session.cmd.Wait()
 }
 
-func (session *generatorSession) generate(item *animation, dir string, segments []promptSegment, promptPaths []string) error {
-	fields := []string{fmt.Sprint(item.TransitionFrames), fmt.Sprint(item.DiffusionSteps), fmt.Sprint(item.Seed), dir}
-	for index, segment := range segments {
-		fields = append(fields, fmt.Sprint(segment.Frames), promptPaths[index])
+// One request per line to the native worker: transition, steps, seed,
+// text_cfg, then (frames, prompt) pairs with the prompt base64-encoded so a
+// paragraph with tabs or newlines stays one field.  The reply is one line,
+// "OK\tframes\tjoints", followed by the motion as raw little-endian float32
+// (frames*3 root positions, then frames*joints*4 local XYZW rotations), or
+// "ERR\tmessage".  Nothing touches the disk on either side.
+func (session *generatorSession) generate(item *animation, segments []promptSegment) ([]float32, []float32, error) {
+	fields := []string{fmt.Sprint(item.TransitionFrames), fmt.Sprint(item.DiffusionSteps), fmt.Sprint(item.Seed), strconv.FormatFloat(item.TextCFG, 'f', -1, 64)}
+	for _, segment := range segments {
+		fields = append(fields, fmt.Sprint(segment.Frames), base64.StdEncoding.EncodeToString([]byte(segment.Prompt)))
 	}
 	if _, err := fmt.Fprintln(session.stdin, strings.Join(fields, "\t")); err != nil {
-		return err
+		return nil, nil, err
 	}
 	response, err := session.stdout.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("native worker stopped: %w", err)
+		return nil, nil, fmt.Errorf("native worker stopped: %w", err)
 	}
 	response = strings.TrimSpace(response)
 	if strings.HasPrefix(response, "ERR\t") {
-		return fmt.Errorf("native worker: %s", strings.TrimPrefix(response, "ERR\t"))
+		return nil, nil, fmt.Errorf("native worker: %s", strings.TrimPrefix(response, "ERR\t"))
 	}
-	if !strings.HasPrefix(response, "OK\t") {
-		return fmt.Errorf("invalid native worker response %q", response)
+	parts := strings.Split(response, "\t")
+	if len(parts) != 3 || parts[0] != "OK" {
+		return nil, nil, fmt.Errorf("invalid native worker response %q", response)
 	}
-	return nil
+	frames, framesErr := strconv.Atoi(parts[1])
+	joints, jointsErr := strconv.Atoi(parts[2])
+	if framesErr != nil || jointsErr != nil || frames < 1 || joints < 1 {
+		return nil, nil, fmt.Errorf("invalid native worker response %q", response)
+	}
+	roots, err := session.readF32(frames * 3)
+	if err != nil {
+		return nil, nil, fmt.Errorf("native worker motion: %w", err)
+	}
+	rotations, err := session.readF32(frames * joints * 4)
+	if err != nil {
+		return nil, nil, fmt.Errorf("native worker motion: %w", err)
+	}
+	return roots, rotations, nil
+}
+
+// The next count float32 values off the worker's stdout.
+func (session *generatorSession) readF32(count int) ([]float32, error) {
+	b := make([]byte, count*4)
+	if _, err := io.ReadFull(session.stdout, b); err != nil {
+		return nil, err
+	}
+	values := make([]float32, count)
+	for i := range values {
+		values[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return values, nil
 }
 
 func token() string {
@@ -165,26 +225,8 @@ func safePathPart(value string) bool {
 	}
 	return true
 }
-func (g *gallery) save(a *animation) error {
-	b, err := json.MarshalIndent(a, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(g.output, a.ID+".json"), b, 0644)
-}
-func (g *gallery) list() []*animation {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	result := make([]*animation, 0, len(g.items))
-	for _, item := range g.items {
-		copy := *item
-		result = append(result, &copy)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt > result[j].CreatedAt })
-	return result
-}
 
-func readF32(path string) ([]float32, error) {
+func readF32File(path string) ([]float32, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -199,12 +241,132 @@ func readF32(path string) ([]float32, error) {
 	return values, nil
 }
 
-func writeF32(path string, values []float32) error {
-	b := make([]byte, len(values)*4)
-	for i, value := range values {
-		binary.LittleEndian.PutUint32(b[i*4:], math.Float32bits(value))
+func writeF32File(path string, values []float32) error {
+	return os.WriteFile(path, appendF32(make([]byte, 0, len(values)*4), values), 0600)
+}
+
+// With -output, an animation persists as <id>.json beside an <id>/ folder
+// holding root_positions.f32, local_rotations_xyzw.f32 and animation.glb
+// once it is ready -- the layout every earlier gallery used, so an existing
+// demo-output reloads.  Without -output this is a no-op.  Called with the
+// lock held.
+func (g *gallery) save(a *animation) error {
+	if g.output == "" {
+		return nil
 	}
-	return os.WriteFile(path, b, 0600)
+	b, err := json.MarshalIndent(a, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(g.output, a.ID+".json"), b, 0644); err != nil {
+		return err
+	}
+	if a.Status != "ready" || a.glb == nil {
+		return nil
+	}
+	dir := filepath.Join(g.output, a.ID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	if err := writeF32File(filepath.Join(dir, "root_positions.f32"), a.roots); err != nil {
+		return err
+	}
+	if err := writeF32File(filepath.Join(dir, "local_rotations_xyzw.f32"), a.rotations); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "animation.glb"), a.glb, 0600)
+}
+
+func (g *gallery) saveLogged(a *animation) {
+	if err := g.save(a); err != nil {
+		log.Printf("save %s: %v", a.ID, err)
+	}
+}
+
+// Reload a persisted gallery: every <id>.json, the ready ones with their
+// streams read back and their GLB rebuilt in memory (and written when the
+// file is missing).  A ready record whose streams are gone is skipped; one
+// the server stopped in the middle of is failed.
+func (g *gallery) load() {
+	entries, _ := filepath.Glob(filepath.Join(g.output, "*.json"))
+	for _, path := range entries {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var a animation
+		if json.Unmarshal(b, &a) != nil || a.ID == "" {
+			continue
+		}
+		if a.TextQuantization == "" {
+			a.TextQuantization = "bf16"
+		}
+		if a.Status == "queued" || a.Status == "running" {
+			a.Status = "failed"
+			a.Error = "the server stopped before this animation was generated"
+		}
+		if a.Status == "ready" {
+			dir := filepath.Join(g.output, a.ID)
+			roots, err := readF32File(filepath.Join(dir, "root_positions.f32"))
+			if err != nil {
+				log.Printf("skip %s: %v", a.ID, err)
+				continue
+			}
+			rotations, err := readF32File(filepath.Join(dir, "local_rotations_xyzw.f32"))
+			if err != nil {
+				log.Printf("skip %s: %v", a.ID, err)
+				continue
+			}
+			model, ok := g.models[a.Model]
+			if !ok {
+				model = g.models["smplx-rp-v1"]
+			}
+			glb, err := buildMotionGLB(roots, rotations, model.SkeletonKey)
+			if err != nil {
+				log.Printf("skip %s: %v", a.ID, err)
+				continue
+			}
+			a.roots, a.rotations, a.glb = roots, rotations, glb
+			glbPath := filepath.Join(dir, "animation.glb")
+			if _, statErr := os.Stat(glbPath); statErr != nil {
+				if err := os.WriteFile(glbPath, glb, 0600); err != nil {
+					log.Printf("export %s: %v", a.ID, err)
+				}
+			}
+		}
+		g.items[a.ID] = &a
+	}
+	log.Printf("gallery: %d animation(s) reloaded from %s", len(g.items), g.output)
+}
+
+// Without -output the gallery lives in memory.  Called with the lock held:
+// the most recent galleryKeep finished animations stay, older ones go.
+func (g *gallery) trim() {
+	finished := make([]*animation, 0, len(g.items))
+	for _, item := range g.items {
+		if item.Status == "ready" || item.Status == "failed" {
+			finished = append(finished, item)
+		}
+	}
+	if len(finished) <= galleryKeep {
+		return
+	}
+	sort.Slice(finished, func(i, j int) bool { return finished[i].CreatedAt > finished[j].CreatedAt })
+	for _, item := range finished[galleryKeep:] {
+		delete(g.items, item.ID)
+	}
+}
+
+func (g *gallery) list() []*animation {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	result := make([]*animation, 0, len(g.items))
+	for _, item := range g.items {
+		copy := *item
+		result = append(result, &copy)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt > result[j].CreatedAt })
+	return result
 }
 
 // Each motion is exported as a node-only GLB: it deliberately has no mesh or
@@ -246,11 +408,11 @@ func appendF32(dst []byte, values []float32) []byte {
 	return dst
 }
 
-func writeSkeletonGLB(path string, roots, rotations []float32, skeleton skeletonDefinition) error {
+func buildSkeletonGLB(roots, rotations []float32, skeleton skeletonDefinition) ([]byte, error) {
 	frames := len(roots) / 3
 	joints := len(skeleton.parents)
 	if frames < 1 || joints < 1 || len(skeleton.names) != joints || len(skeleton.offsets) != joints || len(roots) != frames*3 || len(rotations) != frames*joints*4 {
-		return fmt.Errorf("invalid %s motion for GLB export", skeleton.key)
+		return nil, fmt.Errorf("invalid %s motion for GLB export", skeleton.key)
 	}
 	times := make([]float32, frames)
 	for i := range times {
@@ -317,7 +479,7 @@ func writeSkeletonGLB(path string, roots, rotations []float32, skeleton skeleton
 	}
 	jsonChunk, err := json.Marshal(document)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for len(jsonChunk)%4 != 0 {
 		jsonChunk = append(jsonChunk, ' ')
@@ -341,23 +503,15 @@ func writeSkeletonGLB(path string, roots, rotations []float32, skeleton skeleton
 	putU32(uint32(len(bin)))
 	putU32(0x004e4942)
 	out = append(out, bin...)
-	return os.WriteFile(path, out, 0600)
+	return out, nil
 }
 
-func exportSkeletonGLB(dir, skeletonKey string) error {
+func buildMotionGLB(roots, rotations []float32, skeletonKey string) ([]byte, error) {
 	skeleton, ok := skeletonDefinitions[skeletonKey]
 	if !ok {
-		return fmt.Errorf("unsupported skeleton %q", skeletonKey)
+		return nil, fmt.Errorf("unsupported skeleton %q", skeletonKey)
 	}
-	roots, err := readF32(filepath.Join(dir, "root_positions.f32"))
-	if err != nil {
-		return err
-	}
-	rotations, err := readF32(filepath.Join(dir, "local_rotations_xyzw.f32"))
-	if err != nil {
-		return err
-	}
-	return writeSkeletonGLB(filepath.Join(dir, "animation.glb"), roots, rotations, skeleton)
+	return buildSkeletonGLB(roots, rotations, skeleton)
 }
 
 func (g *gallery) worker() {
@@ -367,61 +521,46 @@ func (g *gallery) worker() {
 		g.mu.Lock()
 		item := g.items[id]
 		item.Status = "running"
-		_ = g.save(item)
+		g.saveLogged(item)
 		g.mu.Unlock()
-		dir := filepath.Join(g.output, id)
-		err := os.MkdirAll(dir, 0755)
-		if err == nil {
-			err = os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte(item.Prompt), 0600)
-		}
-		if err == nil {
-			model, ok := g.models[item.Model]
-			if !ok || !model.Available {
-				err = fmt.Errorf("model %q is not available", item.Model)
-			} else {
-				textID := item.TextQuantization
-				if textID == "" {
-					textID = "q8_0"
+		var roots, rotations []float32
+		var glb []byte
+		var err error
+		model, ok := g.models[item.Model]
+		if !ok || !model.Available {
+			err = fmt.Errorf("model %q is not available", item.Model)
+		} else {
+			textID := item.TextQuantization
+			if textID == "" {
+				textID = "q8_0"
+			}
+			text, textOK := g.textBundles[textID]
+			if !textOK || !text.Available {
+				err = fmt.Errorf("text quantization %q is not available", textID)
+			}
+			if err == nil {
+				segments := item.Segments
+				if len(segments) == 0 {
+					segments = []promptSegment{{Prompt: item.Prompt, Frames: item.Frames}}
 				}
-				text, textOK := g.textBundles[textID]
-				if !textOK || !text.Available {
-					err = fmt.Errorf("text quantization %q is not available", textID)
+				g.mu.Lock()
+				item.Progress = fmt.Sprintf("Generating %d conditioned segments", len(segments))
+				g.mu.Unlock()
+				key := model.Motion + "\x00" + text.Path
+				if session == nil || session.key != key {
+					session.close()
+					session, err = startGeneratorSession(g.generator, model, text)
 				}
 				if err == nil {
-					segments := item.Segments
-					if len(segments) == 0 {
-						segments = []promptSegment{{Prompt: item.Prompt, Frames: item.Frames}}
-					}
-					promptPaths := make([]string, 0, len(segments))
-					for index, segment := range segments {
-						promptPath := filepath.Join(dir, fmt.Sprintf("segment-%02d.txt", index+1))
-						if err = os.WriteFile(promptPath, []byte(segment.Prompt), 0600); err != nil {
-							break
-						}
-						promptPaths = append(promptPaths, promptPath)
-					}
-					if err == nil {
-						g.mu.Lock()
-						item.Progress = fmt.Sprintf("Generating %d conditioned segments", len(segments))
-						_ = g.save(item)
-						g.mu.Unlock()
-						key := model.Motion + "\x00" + text.Path
-						if session == nil || session.key != key {
-							session.close()
-							session, err = startGeneratorSession(g.generator, model, text)
-						}
-						if err == nil {
-							err = session.generate(item, dir, segments, promptPaths)
-							if err != nil {
-								session.close()
-								session = nil
-							}
-						}
-					}
-					if err == nil {
-						err = exportSkeletonGLB(dir, model.SkeletonKey)
+					roots, rotations, err = session.generate(item, segments)
+					if err != nil {
+						session.close()
+						session = nil
 					}
 				}
+			}
+			if err == nil {
+				glb, err = buildMotionGLB(roots, rotations, model.SkeletonKey)
 			}
 		}
 		g.mu.Lock()
@@ -429,11 +568,13 @@ func (g *gallery) worker() {
 			item.Status = "failed"
 			item.Error = err.Error()
 		} else {
+			item.roots, item.rotations, item.glb = roots, rotations, glb
 			item.Status = "ready"
 			item.Progress = ""
 		}
-		if saveErr := g.save(item); saveErr != nil {
-			log.Printf("save %s: %v", item.ID, saveErr)
+		g.saveLogged(item)
+		if g.output == "" {
+			g.trim()
 		}
 		g.mu.Unlock()
 	}
@@ -459,15 +600,17 @@ func main() {
 	textQ4 := flag.String("text-q4-bundle", preferPacked("Llama-3-Kimodo-Q4_K.gguf", "generated/llm2vec-text-q4_k"), "Q4_K LLM2Vec GGUF or legacy component directory")
 	textQ4Mixed := flag.String("text-q4-mixed-bundle", preferPacked("Llama-3-Kimodo-Q4_K_M.gguf", "generated/llm2vec-text-q4_k_m"), "mixed Q4_K LLM2Vec GGUF or legacy component directory")
 	generator := flag.String("generator", "build/debug/kmd-generate", "native text-to-motion command")
-	output := flag.String("output", "demo-output", "persistent gallery directory")
+	output := flag.String("output", "", "gallery directory: when set, animations persist there (records, raw streams and GLBs) and reload at startup; empty keeps them in memory only")
 	comparisons := flag.String("comparisons", "quantization-comparisons", "viewer-ready quantization comparison directories")
 	flag.Parse()
-	if err := os.MkdirAll(*output, 0755); err != nil {
-		log.Fatal(err)
+	if *output != "" {
+		if err := os.MkdirAll(*output, 0755); err != nil {
+			log.Fatal(err)
+		}
 	}
 	makeModel := func(id, label, skeletonLabel, skeletonKey, upstream, license, licenseURL, path string, commercial bool) motionModel {
 		definition := skeletonDefinitions[skeletonKey]
-		model := motionModel{ID: id, Label: label, Skeleton: skeletonLabel, SkeletonKey: skeletonKey, Upstream: upstream, License: license, LicenseURL: licenseURL, Commercial: commercial, Parents: definition.parents, Offsets: definition.offsets, Motion: path}
+		model := motionModel{ID: id, Label: label, Skeleton: skeletonLabel, SkeletonKey: skeletonKey, Upstream: upstream, License: license, LicenseURL: licenseURL, Commercial: commercial, MaxFrames: maxSegmentFrames, Parents: definition.parents, Offsets: definition.offsets, Motion: path}
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 			model.Available = true
 		} else {
@@ -526,28 +669,8 @@ func main() {
 		"q4_k_m": makeTextBundle("q4_k_m", "Q4_K mixed", "Experimental mixed-bit profile that improves on uniform Q4_K.", *textQ4Mixed),
 	}
 	g := &gallery{items: map[string]*animation{}, output: *output, queue: make(chan string, 32), generator: *generator, models: models, textBundles: textBundles}
-	entries, _ := filepath.Glob(filepath.Join(*output, "*.json"))
-	for _, path := range entries {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var a animation
-		if json.Unmarshal(b, &a) == nil {
-			if a.TextQuantization == "" {
-				a.TextQuantization = "bf16"
-			}
-			g.items[a.ID] = &a
-			if a.Status == "ready" {
-				model, ok := models[a.Model]
-				if !ok {
-					model = models["smplx-rp-v1"]
-				}
-				if err := exportSkeletonGLB(filepath.Join(*output, a.ID), model.SkeletonKey); err != nil && !os.IsNotExist(err) {
-					log.Printf("export existing animation %s: %v", a.ID, err)
-				}
-			}
-		}
+	if g.output != "" {
+		g.load()
 	}
 	go g.worker()
 	index, err := files.ReadFile("index.html")
@@ -655,6 +778,7 @@ func main() {
 			Seed             uint64          `json:"seed"`
 			Model            string          `json:"model"`
 			TextQuantization string          `json:"text_quantization"`
+			TextCFG          float64         `json:"text_cfg"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10)).Decode(&request); err != nil {
 			http.Error(w, "invalid JSON", 400)
@@ -679,8 +803,8 @@ func main() {
 			if request.Segments[index].Frames == 0 {
 				request.Segments[index].Frames = 150
 			}
-			if request.Segments[index].Prompt == "" || len(request.Segments[index].Prompt) > 4096 || request.Segments[index].Frames < 60 || request.Segments[index].Frames > 150 {
-				http.Error(w, "each prompt segment must be 60..150 frames and 1..4096 bytes", 400)
+			if request.Segments[index].Prompt == "" || len(request.Segments[index].Prompt) > 4096 || request.Segments[index].Frames < minSegmentFrames || request.Segments[index].Frames > maxSegmentFrames {
+				http.Error(w, fmt.Sprintf("each prompt segment must be %d..%d frames and 1..4096 bytes", minSegmentFrames, maxSegmentFrames), 400)
 				return
 			}
 		}
@@ -689,6 +813,14 @@ func main() {
 		}
 		if request.TransitionFrames < 1 || request.TransitionFrames > 60 || request.Steps < 1 || request.Steps > 1000 {
 			http.Error(w, "transition frames must be 1..60 and steps 1..1000", 400)
+			return
+		}
+		// Upstream's text guidance weight; the native worker keeps the constraint weight at 2.0.
+		if request.TextCFG == 0 {
+			request.TextCFG = 2
+		}
+		if math.IsNaN(request.TextCFG) || math.IsInf(request.TextCFG, 0) || request.TextCFG < 0 || request.TextCFG > 20 {
+			http.Error(w, "text_cfg must be in 0..20", 400)
 			return
 		}
 		if request.Model == "" {
@@ -715,7 +847,7 @@ func main() {
 		for _, segment := range request.Segments {
 			totalFrames += segment.Frames
 		}
-		a := &animation{ID: token(), Prompt: request.Segments[0].Prompt, Frames: totalFrames, DiffusionSteps: request.Steps, Seed: request.Seed, CreatedAt: time.Now().UTC().Format(time.RFC3339), Status: "queued", Kind: "generated", Model: request.Model, TextQuantization: request.TextQuantization, Segments: request.Segments, TransitionFrames: request.TransitionFrames}
+		a := &animation{ID: token(), Prompt: request.Segments[0].Prompt, Frames: totalFrames, DiffusionSteps: request.Steps, Seed: request.Seed, CreatedAt: time.Now().UTC().Format(time.RFC3339), Status: "queued", Kind: "generated", Model: request.Model, TextQuantization: request.TextQuantization, Segments: request.Segments, TransitionFrames: request.TransitionFrames, TextCFG: request.TextCFG}
 		g.mu.Lock()
 		g.items[a.ID] = a
 		err := g.save(a)
@@ -737,35 +869,45 @@ func main() {
 		}
 		g.mu.RLock()
 		a := g.items[parts[0]]
+		var data []byte
+		if a != nil && a.Status == "ready" {
+			switch parts[1] {
+			case "root.f32":
+				data = appendF32(make([]byte, 0, len(a.roots)*4), a.roots)
+			case "rotations.f32":
+				data = appendF32(make([]byte, 0, len(a.rotations)*4), a.rotations)
+			default:
+				data = a.glb
+			}
+		}
 		g.mu.RUnlock()
-		if a == nil || a.Status != "ready" {
+		if data == nil {
 			http.NotFound(w, r)
 			return
 		}
-		name := "root_positions.f32"
-		if parts[1] == "rotations.f32" {
-			name = "local_rotations_xyzw.f32"
-		}
 		if parts[1] == "animation.glb" {
-			name = "animation.glb"
 			w.Header().Set("Content-Type", "model/gltf-binary")
 			w.Header().Set("Content-Disposition", "attachment; filename=kimodo-"+a.ID+".glb")
-			// A GLB is a compact asset; read it directly so browsers always receive
-			// it as a download rather than invoking any path-cleaning redirects.
-			data, err := os.ReadFile(filepath.Join(g.output, a.ID, name))
-			if err != nil {
-				http.NotFound(w, r)
-				return
-			}
-			w.Header().Set("Content-Length", fmt.Sprint(len(data)))
-			_, _ = w.Write(data)
-			return
 		} else {
 			w.Header().Set("Content-Type", "application/octet-stream")
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		http.ServeFile(w, r, filepath.Join(g.output, a.ID, name))
+		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		_, _ = w.Write(data)
+	})
+	// CORS: the ContraptionFabricator web build (a browser page on another
+	// origin) talks to this server with fetch, and the JSON POST triggers a
+	// preflight.  Everything here is a local demo, so every origin is welcome.
+	cors := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		mux.ServeHTTP(w, r)
 	})
 	log.Printf("Kimodo text-to-motion demo listening at http://%s", *addr)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	log.Fatal(http.ListenAndServe(*addr, cors))
 }

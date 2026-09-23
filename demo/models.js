@@ -72,7 +72,7 @@ window.addEventListener('load', async () => {
   };
   prompt.style.minHeight = '110px';
   prompt.addEventListener('input', () => autoGrow(prompt));
-  const minFrames = 60, maxFrames = 150;
+  const minFrames = 60, maxFrames = 360;
   const segmentControls = new Map();
   const validFrames = value => Number.isInteger(value) && value >= minFrames && value <= maxFrames;
   const clampFrames = value => validFrames(Number(value)) ? Number(value) : Math.max(minFrames, Math.min(maxFrames, Number(value) || 150));
@@ -110,10 +110,45 @@ window.addEventListener('load', async () => {
   add.style.cssText = 'justify-self:start;padding:8px 12px;background:#24313a;color:#dce9e8';
   add.onclick = () => addSegment(); form.insertBefore(add, generate); form.insertBefore(count, generate); updateCount();
 
+  // Diffusion seed. The viewer used to send seed 0 for every request, so the
+  // same prompt always produced the same animation. Start random, keep the
+  // seed of a restored animation so it can be regenerated exactly, and offer
+  // a one-click reroll for a fresh sample of the same prompt.
+  const maxSeed = 0xFFFFFFFF;
+  const randomSeed = () => crypto.getRandomValues(new Uint32Array(1))[0];
+  const clampSeed = value => { const n = Math.floor(Number(value)); return Number.isFinite(n) && n >= 0 && n <= maxSeed ? n : randomSeed(); };
+  const seedRow = document.createElement('div'); seedRow.style.cssText = 'display:grid;grid-template-columns:auto 1fr auto;gap:7px;align-items:center';
+  const seedLabel = document.createElement('label'); seedLabel.htmlFor = 'seed'; seedLabel.textContent = 'Seed';
+  const seedInput = document.createElement('input'); seedInput.id = 'seed'; seedInput.type = 'number'; seedInput.min = '0'; seedInput.max = String(maxSeed); seedInput.step = '1';
+  seedInput.value = String(randomSeed()); seedInput.title = 'Diffusion noise seed. Same prompt + seed reproduces the same motion; change it for a different sample.';
+  seedInput.addEventListener('change', () => { seedInput.value = String(clampSeed(seedInput.value)); seedInput.setCustomValidity(''); });
+  seedInput.addEventListener('invalid', () => seedInput.setCustomValidity(`Use a whole number from 0 to ${maxSeed}.`));
+  const reroll = document.createElement('button'); reroll.type = 'button'; reroll.textContent = 'Random'; reroll.title = 'Pick a new random seed';
+  reroll.style.cssText = 'padding:8px 12px;background:#24313a;color:#dce9e8';
+  reroll.onclick = () => { seedInput.value = String(randomSeed()); };
+  seedRow.append(seedLabel, seedInput, reroll); form.insertBefore(seedRow, generate);
+
+  // Text guidance (classifier-free guidance) weight. Upstream samples at 2.0.
+  // Lower values follow the prompt less literally but move more naturally;
+  // higher values track the caption harder and tend to look stiff.
+  const defaultCFG = 2, minCFG = 0, maxCFG = 20;
+  const clampCFG = value => { const n = Number(value); return Number.isFinite(n) && n >= minCFG && n <= maxCFG ? Math.round(n * 100) / 100 : defaultCFG; };
+  const cfgRow = document.createElement('div'); cfgRow.style.cssText = seedRow.style.cssText;
+  const cfgLabel = document.createElement('label'); cfgLabel.htmlFor = 'textCFG'; cfgLabel.textContent = 'Text guidance';
+  const cfgInput = document.createElement('input'); cfgInput.id = 'textCFG'; cfgInput.type = 'number'; cfgInput.min = String(minCFG); cfgInput.max = String(maxCFG); cfgInput.step = '0.1';
+  cfgInput.value = String(defaultCFG); cfgInput.title = `Classifier-free guidance weight (${minCFG}–${maxCFG}). Upstream default 2.0; lower is looser and more natural, higher follows the prompt more literally.`;
+  cfgInput.addEventListener('change', () => { cfgInput.value = String(clampCFG(cfgInput.value)); cfgInput.setCustomValidity(''); });
+  cfgInput.addEventListener('invalid', () => cfgInput.setCustomValidity(`Use a number from ${minCFG} to ${maxCFG}.`));
+  const cfgReset = document.createElement('button'); cfgReset.type = 'button'; cfgReset.textContent = 'Default'; cfgReset.title = 'Reset to the upstream default of 2.0';
+  cfgReset.style.cssText = reroll.style.cssText; cfgReset.onclick = () => { cfgInput.value = String(defaultCFG); };
+  cfgRow.append(cfgLabel, cfgInput, cfgReset); form.insertBefore(cfgRow, generate);
+
   // The gallery owns the selected animation; receive its full saved sequence
   // rather than restoring only animation.prompt (the first segment).
   window.addEventListener('kimodo:restore-sequence', event => {
-    const {segments, model, text_quantization: textQuantization} = event.detail || {};
+    const {segments, model, text_quantization: textQuantization, seed, text_cfg: textCFG} = event.detail || {};
+    if (seed !== undefined && seed !== null) seedInput.value = String(clampSeed(seed));
+    cfgInput.value = String(clampCFG(textCFG ?? defaultCFG));
     if (model && [...select.options].some(option => option.value === model)) {
       select.value = model;
       updateModel();
@@ -145,6 +180,8 @@ window.addEventListener('load', async () => {
       body.model = select.value;
       body.text_quantization = quantizationSelect.value;
       body.transition_frames = 5;
+      body.seed = clampSeed(seedInput.value); seedInput.value = String(body.seed);
+      body.text_cfg = clampCFG(cfgInput.value); cfgInput.value = String(body.text_cfg);
       body.segments = [...sequence.querySelectorAll('.sequence-prompt')].map(area => {
         const row = area.closest('div');
         const duration = segmentControls.get(row);

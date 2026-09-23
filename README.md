@@ -82,14 +82,25 @@ go run ./demo -addr 0.0.0.0:8094
 ```
 
 Open `http://localhost:8094`. The left sidebar contains the prompt and a
-persistent history plus motion-model and text-encoder-quantization selectors;
+history of this session's animations plus motion-model and
+text-encoder-quantization selectors;
 choosing a previous animation restores its prompt and encoder choice for a new
-generation. Every successful animation also writes a standalone
-`animation.glb` beside its raw streams, for example
-`demo-output/<animation-id>/animation.glb`. It contains the selected animated
-node hierarchy (no mesh), ready to copy into a Three.js project. It is also
-available from `/api/animations/<animation-id>/animation.glb` while the demo
-is running.
+generation. Every successful animation is also built as a standalone
+`animation.glb` beside its raw streams. By default nothing is written to
+disk: the gallery, the streams and the GLB live in the server's memory (the
+most recent 64 animations) and are gone when it stops. With
+`-output demo-output` every animation also persists there as
+`<animation-id>.json` beside `<animation-id>/animation.glb` and its raw
+streams, and the gallery reloads on the next start. The GLB contains the
+selected animated node hierarchy (no mesh), ready to copy into a Three.js
+project; it is available from `/api/animations/<animation-id>/animation.glb`
+while the demo is running. Segments may be 60..360 frames (2..12 s at
+30 fps).
+
+On Windows, `start-demo.bat` builds and runs the demo with the persistent
+gallery and opens the page; `start-server.bat` runs the service alone, in
+memory, for a client such as ContraptionFabricator's Clip Editor;
+`stop-demo.bat` and `stop-server.bat` stop it from anywhere.
 
 The demo keeps all 32 layers of its default Q8 text encoder in VRAM for maximum
 throughput, while executing them as bounded eight-layer GGML graphs. Its 10 GiB

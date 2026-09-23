@@ -3,16 +3,13 @@ package main
 import (
 	"encoding/binary"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
-func TestWriteSkeletonGLB(t *testing.T) {
+func TestBuildSkeletonGLB(t *testing.T) {
 	for _, skeletonKey := range []string{"smplx22", "soma30", "g1skel34"} {
 		t.Run(skeletonKey, func(t *testing.T) {
 			skeleton := skeletonDefinitions[skeletonKey]
-			path := filepath.Join(t.TempDir(), "animation.glb")
 			roots := []float32{0, 0, 0, 1, 0, 0}
 			rotations := make([]float32, 2*len(skeleton.parents)*4)
 			for frame := 0; frame < 2; frame++ {
@@ -20,10 +17,11 @@ func TestWriteSkeletonGLB(t *testing.T) {
 					rotations[(frame*len(skeleton.parents)+joint)*4+3] = 1
 				}
 			}
-			if err := writeSkeletonGLB(path, roots, rotations, skeleton); err != nil {
+			glb, err := buildSkeletonGLB(roots, rotations, skeleton)
+			if err != nil {
 				t.Fatal(err)
 			}
-			assertSkeletonGLB(t, path, len(skeleton.parents))
+			assertSkeletonGLB(t, glb, len(skeleton.parents))
 		})
 	}
 }
@@ -41,12 +39,8 @@ func TestSafePathPart(t *testing.T) {
 	}
 }
 
-func assertSkeletonGLB(t *testing.T, path string, expectedJoints int) {
+func assertSkeletonGLB(t *testing.T, b []byte, expectedJoints int) {
 	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if len(b) < 20 || binary.LittleEndian.Uint32(b) != 0x46546c67 || binary.LittleEndian.Uint32(b[4:]) != 2 || int(binary.LittleEndian.Uint32(b[8:])) != len(b) {
 		t.Fatalf("invalid GLB header")
 	}
