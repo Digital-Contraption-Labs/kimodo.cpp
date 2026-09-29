@@ -3,8 +3,9 @@
 // The native worker streams each motion back over its stdout; the gallery
 // keeps animations (their raw streams and the GLB built from them) in
 // memory.  By default nothing is written to disk and only the most recent
-// animations are kept (start-server.bat); with -output the gallery also
-// persists to that directory and reloads on the next start (start-demo.bat).
+// animations are kept (scripts/start-server.bat); with -output the gallery
+// also persists to that directory and reloads on the next start
+// (scripts/start-demo.bat).
 package main
 
 import (

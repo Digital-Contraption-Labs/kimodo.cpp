@@ -4,16 +4,18 @@ rem Start the Kimodo text-to-motion service on Windows: the HTTP API alone,
 rem gallery in memory, nothing written to disk, no browser.  This is what a
 rem client such as ContraptionFabricator's Clip Editor talks to.
 rem
-rem   start-server.bat                      serve on http://127.0.0.1:8094
-rem   start-server.bat -addr 0.0.0.0:8094   pass extra flags through to the server
-rem   start-server.bat -output demo-output  persist the gallery to disk as well
-rem                                         (start-demo.bat does this and opens
-rem                                         the demo page)
+rem   scripts\start-server.bat                      serve on http://127.0.0.1:8094
+rem   scripts\start-server.bat -addr 0.0.0.0:8094   pass extra flags through to the server
+rem   scripts\start-server.bat -output demo-output  persist the gallery to disk as well
+rem                                                 (start-demo.bat does this and
+rem                                                 opens the demo page)
 rem
-rem The server runs in this window; press Ctrl+C or close the window to stop
-rem it, or run stop-server.bat from anywhere.  KIMODO_OPEN_URL, when a caller
-rem sets it, is opened in the browser once the server listens.
-cd /d "%~dp0"
+rem Build the native worker first with scripts\build\build_service.bat.  The
+rem server runs in this window; press Ctrl+C or close the window to stop it, or
+rem run scripts\stop-server.bat from anywhere.  KIMODO_OPEN_URL, when a caller
+rem sets it, is opened in the browser once the server listens.  Paths such as
+rem -output resolve against the repository root, where this runs.
+cd /d "%~dp0.."
 
 set "ADDR=127.0.0.1:8094"
 set "GENERATOR=build\release\kmd-generate.exe"
@@ -30,8 +32,7 @@ if not exist "%GO%" if not "%GO%"=="go" (
 
 if not exist "%GENERATOR%" (
     echo %GENERATOR% not found.
-    echo Build it first from a VS 2022 x64 developer shell:
-    echo     cmake --preset windows-release ^&^& cmake --build --preset windows-release
+    echo Build it first with: scripts\build\build_service.bat
     exit /b 1
 )
 if not exist "tokenizer.gguf" (
@@ -41,7 +42,7 @@ if not exist "tokenizer.gguf" (
 
 tasklist /fi "imagename eq kimodo-demo.exe" 2>nul | findstr /i /c:"kimodo-demo.exe" >nul
 if not errorlevel 1 (
-    echo The Kimodo server is already running at http://%ADDR% -- stop-server.bat stops it.
+    echo The Kimodo server is already running at http://%ADDR% -- scripts\stop-server.bat stops it.
     if defined KIMODO_OPEN_URL start "" "%KIMODO_OPEN_URL%"
     exit /b 0
 )
@@ -55,7 +56,7 @@ if errorlevel 1 (
 
 echo.
 echo Kimodo service: http://%ADDR%
-echo Press Ctrl+C here or run stop-server.bat to stop it.
+echo Press Ctrl+C here or run scripts\stop-server.bat to stop it.
 echo.
 rem A caller that wants the browser (start-demo.bat) gets it once the server
 rem has had a moment to start listening.

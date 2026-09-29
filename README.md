@@ -108,10 +108,15 @@ G1): foot-skate cleanup and IK that land constraints exactly; send
 `"post_processing": false` for the raw diffusion output. The request format and
 what to expect are in [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md).
 
-On Windows, `start-demo.bat` builds and runs the demo with the persistent
-gallery and opens the page; `start-server.bat` runs the service alone, in
-memory, for a client such as ContraptionFabricator's Clip Editor;
-`stop-demo.bat` and `stop-server.bat` stop it from anywhere.
+On Windows, `scripts\build\build_service.bat` builds the service (release by
+default, `--debug` for a debug build) from any shell: it loads the Visual
+Studio x64 toolchain itself, initialises the submodules, configures and
+builds the `windows-release` or `windows-debug` preset's `kmd-generate`, and
+builds the Go server. `scripts\start-demo.bat` then runs the demo with the
+persistent gallery and opens the page; `scripts\start-server.bat` runs the
+service alone, in memory, for a client such as ContraptionFabricator's Clip
+Editor; `scripts\stop-demo.bat` and `scripts\stop-server.bat` stop it from
+anywhere.
 
 The demo keeps all 32 layers of its default Q8 text encoder in VRAM for maximum
 throughput, while executing them as bounded eight-layer GGML graphs. Its 10 GiB
