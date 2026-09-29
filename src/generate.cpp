@@ -2,7 +2,9 @@
 // public C++ model API, so the demo exercises the same text route as embedders.
 #include <kimodo/kimodo.hpp>
 
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -47,12 +49,15 @@ std::string protocol_error(std::string message) {
 }
 
 // The demo server's line protocol (demo/main.go): one request per line,
-// TAB-separated -- transition, steps, seed, text_cfg, then (frames, prompt)
-// pairs with the prompt base64-encoded so a paragraph with tabs or newlines
-// stays one field.  The reply is one line, "OK\tframes\tjoints", followed by
-// the motion as raw little-endian float32 (frames*3 root positions, then
-// frames*joints*4 local XYZW rotations), or "ERR\tmessage".  Nothing touches
-// the disk.
+// TAB-separated -- transition, steps, seed, text_cfg, constraint_cfg,
+// first_heading, post_process (0/1), root_margin, constraints, then
+// (frames, prompt) pairs with the prompt
+// base64-encoded so a paragraph with tabs or newlines stays one field.
+// `constraints` is "-" for none, else the base64 of the binary block that
+// decode_constraints reads.  The reply is one line, "OK\tframes\tjoints",
+// followed by the motion as raw little-endian float32 (frames*3 root
+// positions, then frames*joints*4 local XYZW rotations), or "ERR\tmessage".
+// Nothing touches the disk.
 std::string base64_decode(std::string_view text) {
     static constexpr std::string_view alphabet =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -63,7 +68,7 @@ std::string base64_decode(std::string_view text) {
     for (const char c : text) {
         if (c == '=') break;
         const auto index = alphabet.find(c);
-        if (index == std::string_view::npos) throw std::runtime_error("invalid base64 prompt");
+        if (index == std::string_view::npos) throw std::runtime_error("invalid base64 field");
         accumulator = (accumulator << 6) | static_cast<unsigned>(index);
         bits += 6;
         if (bits >= 8) {
@@ -72,6 +77,69 @@ std::string base64_decode(std::string_view text) {
         }
     }
     return out;
+}
+
+// The constraint block, all little-endian: u32 joints, u32 count, then per
+// constraint u32 type, u32 end_effectors, u32 frame_count F, u32 flags
+// (1 pose, 2 smooth_root_2d, 4 root_heading), u32 frames[F], and as flagged
+// f32 root_positions[F*3] + local_rotations_xyzw[F*joints*4],
+// smooth_root_2d[F*2], root_heading[F*2].
+class constraint_reader {
+public:
+    explicit constraint_reader(std::string_view bytes) : bytes_(bytes) {}
+    std::uint32_t u32() {
+        need(4);
+        std::uint32_t value = 0;
+        for (int i = 3; i >= 0; --i) value = (value << 8) | static_cast<unsigned char>(bytes_[at_ + static_cast<size_t>(i)]);
+        at_ += 4;
+        return value;
+    }
+    std::vector<float> f32(size_t count) {
+        need(count * 4);
+        std::vector<float> values(count);
+        for (float &value : values) value = std::bit_cast<float>(u32());
+        return values;
+    }
+    [[nodiscard]] bool done() const noexcept { return at_ == bytes_.size(); }
+private:
+    void need(size_t count) const {
+        if (count > bytes_.size() - at_) throw std::runtime_error("truncated constraint block");
+    }
+    std::string_view bytes_;
+    size_t at_ = 0;
+};
+
+// Fills `result.constraints` from the protocol's constraint field.
+void decode_constraints(std::string_view field, unsigned joints, kimodo::generation_options &result) {
+    if (field == "-") return;
+    const std::string bytes = base64_decode(field);
+    constraint_reader in(bytes);
+    if (in.u32() != joints) throw std::runtime_error("constraints were built for another skeleton");
+    const std::uint32_t count = in.u32();
+    for (std::uint32_t index = 0; index < count; ++index) {
+        kimodo::motion_constraint c;
+        c.type = static_cast<kimodo::constraint_type>(in.u32());
+        c.end_effectors = in.u32();
+        const std::uint32_t frames = in.u32(), flags = in.u32();
+        if (frames == 0 || frames > 100000) throw std::runtime_error("invalid constraint frame count");
+        for (std::uint32_t frame = 0; frame < frames; ++frame) c.frames.push_back(in.u32());
+        if (flags & 1U) {
+            c.root_positions = in.f32(size_t{frames} * 3);
+            c.local_rotations_xyzw = in.f32(size_t{frames} * joints * 4);
+        }
+        if (flags & 2U) c.smooth_root_2d = in.f32(size_t{frames} * 2);
+        if (flags & 4U) c.root_heading = in.f32(size_t{frames} * 2);
+        result.constraints.push_back(std::move(c));
+    }
+    if (!in.done()) throw std::runtime_error("trailing bytes after the constraint block");
+}
+
+float parse_finite(const std::string &text, float low, float high, const char *what) {
+    std::size_t consumed = 0;
+    const float value = std::stof(text, &consumed);
+    if (consumed != text.size() || !std::isfinite(value) || value < low || value > high)
+        throw std::runtime_error(std::string(what) + " is out of range");
+    return value;
 }
 
 void write_motion_stream(std::ostream &out, const kimodo::motion_data &motion) {
@@ -83,9 +151,9 @@ void write_motion_stream(std::ostream &out, const kimodo::motion_data &motion) {
     if (!out) throw std::runtime_error("cannot write the motion to stdout");
 }
 
-// Upstream samples with separated CFG weights [2.0, 2.0]. Text guidance is the
-// one that shapes a single-prompt clip; the constraint weight only matters for
-// conditioned multi-prompt hand-offs, so it stays at the upstream default.
+// Upstream samples with separated CFG weights [2.0, 2.0].  The positional CLI
+// modes have no constraints, so their constraint weight only shapes
+// multi-prompt hand-offs and stays at the upstream default.
 constexpr float default_text_cfg = 2.F;
 constexpr float constraint_cfg = 2.F;
 
@@ -117,19 +185,27 @@ int main(int argc, char **argv) try {
             try {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 const auto fields = split_fields(line);
-                if (fields.size() < 6 || (fields.size() - 4) % 2 != 0)
+                constexpr size_t header = 9;
+                if (fields.size() < header + 2 || (fields.size() - header) % 2 != 0)
                     throw std::runtime_error("invalid server request");
                 const auto transition = static_cast<unsigned>(std::stoul(fields[0]));
                 const auto steps = static_cast<unsigned>(std::stoul(fields[1]));
                 const auto seed = static_cast<std::uint64_t>(std::stoull(fields[2]));
                 const float text_cfg = parse_text_cfg(fields[3]);
+                const float request_constraint_cfg = parse_finite(fields[4], 0.F, 20.F, "constraint CFG weight");
+                kimodo::generation_options options;
+                options.first_heading = parse_finite(fields[5], -1000.F, 1000.F, "first heading");
+                if (fields[6] != "0" && fields[6] != "1") throw std::runtime_error("post_process must be 0 or 1");
+                options.post_process = fields[6] == "1";
+                options.root_margin = parse_finite(fields[7], 0.F, 10.F, "root margin");
+                decode_constraints(fields[8], (*model)->joints(), options);
                 std::vector<kimodo::prompt_segment> segments;
-                for (size_t index = 4; index < fields.size(); index += 2) {
+                for (size_t index = header; index < fields.size(); index += 2) {
                     std::string prompt = base64_decode(fields[index + 1]);
                     if (prompt.empty()) throw std::runtime_error("empty sequence prompt");
                     segments.push_back({std::move(prompt), static_cast<unsigned>(std::stoul(fields[index]))});
                 }
-                auto motion = (*model)->generate_text_sequence(segments, transition, steps, seed, text_cfg, constraint_cfg);
+                auto motion = (*model)->generate_text_sequence(segments, transition, steps, seed, text_cfg, request_constraint_cfg, options);
                 if (!motion) throw std::runtime_error(motion.error());
                 std::cout << "OK\t" << motion->frames << '\t' << motion->joints << '\n' << std::flush;
                 write_motion_stream(std::cout, *motion);

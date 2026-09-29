@@ -8,6 +8,8 @@
 
 namespace kimodo::detail {
 class ggml_motion_weights;
+struct constraint_condition;
+struct skeleton_spec;
 
 // One sequence segment with an already-encoded text condition and caller-
 // supplied initial noise. Continuation noise includes its transition prefix.
@@ -15,6 +17,15 @@ struct sampled_sequence_segment {
     std::span<const float> embedding;
     std::span<const float> initial_noise;
     std::size_t frames;
+};
+
+struct postprocess_targets;
+
+// Upstream post-processing of every sequence segment: constraint targets over
+// the joined clip (build_postprocess_targets) and the root margin.
+struct sequence_postprocess {
+    const postprocess_targets *targets = nullptr;
+    float root_margin = .04F;
 };
 
 struct sequence_transition {
@@ -65,14 +76,24 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
 
 // End-to-end upstream `_multiprompt` orchestration.  DDIM operates in
 // normalized motion space; the returned joined representation is raw so its
-// translated roots and blended tail preserve upstream semantics.
+// translated roots and blended tail preserve upstream semantics.  `user` is an
+// optional raw condition over the joined clip (the sum of segment frames);
+// each segment takes its own rows, continuations after their transition
+// prefix and translated to its origin, as upstream crops constraint sets.
+// `first_heading` faces the first segment; later ones inherit a heading.
+// With `post`, every segment is post-processed as upstream does.
 std::expected<std::vector<float>, std::string> sample_motion_sequence_from_noise(
     const ggml_motion_weights &weights, std::span<const sampled_sequence_segment> segments,
-    unsigned transition_frames, unsigned steps, float text_weight, float constraint_weight);
+    unsigned transition_frames, unsigned steps, float text_weight, float constraint_weight,
+    const constraint_condition *user = nullptr, float first_heading = 0.F,
+    const sequence_postprocess *post = nullptr);
 
 // Build the exact condition consumed by the next `_multiprompt` DDIM run.
 // Exposed for the raw fixture test as well as the runtime orchestrator.
 std::expected<sequence_transition, std::string> prepare_sequence_transition(
     const ggml_motion_weights &weights, std::span<const float> previous,
+    std::size_t continuation_frames, unsigned transition_frames);
+std::expected<sequence_transition, std::string> prepare_sequence_transition(
+    const skeleton_spec &skeleton, std::span<const float> previous,
     std::size_t continuation_frames, unsigned transition_frames);
 }

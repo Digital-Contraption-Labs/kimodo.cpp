@@ -143,16 +143,89 @@ window.addEventListener('load', async () => {
   cfgReset.style.cssText = reroll.style.cssText; cfgReset.onclick = () => { cfgInput.value = String(defaultCFG); };
   cfgRow.append(cfgLabel, cfgInput, cfgReset); form.insertBefore(cfgRow, generate);
 
+  // Keyframe constraints.  "Pin current pose" takes the pose on screen (the
+  // selected animation at the current frame) as a full-body keyframe for the
+  // next generation, at the same frame by default.  Positions are absolute in
+  // the clip's space, so the pose keeps its place on the ground.  Pins stay
+  // while other animations are viewed; one that was generated with
+  // constraints (also a client's, through the API) offers to reuse them.
+  let keyframes = [], selectedConstraints = [];
+  const constraintRow = document.createElement('div'); constraintRow.style.cssText = seedRow.style.cssText;
+  const keyframeLabel = document.createElement('label'); keyframeLabel.textContent = 'Keyframe guidance';
+  const pin = document.createElement('button'); pin.type = 'button'; pin.textContent = 'Pin current pose';
+  pin.title = 'Make the next generation pass through the pose on screen'; pin.style.cssText = reroll.style.cssText;
+  const constraintCFGInput = document.createElement('input'); constraintCFGInput.type = 'number'; constraintCFGInput.min = String(minCFG); constraintCFGInput.max = String(maxCFG); constraintCFGInput.step = '0.1';
+  constraintCFGInput.value = String(defaultCFG); constraintCFGInput.title = `Constraint guidance weight (${minCFG}–${maxCFG}). Upstream default 2.0; raise it if keyframes are missed.`;
+  constraintCFGInput.addEventListener('change', () => { constraintCFGInput.value = String(clampCFG(constraintCFGInput.value)); });
+  constraintRow.append(keyframeLabel, constraintCFGInput, pin);
+  const keyframeList = document.createElement('div'); keyframeList.style.cssText = 'display:grid;gap:5px';
+  const keyframeHint = document.createElement('div'); keyframeHint.className = 'hint';
+  const reuse = document.createElement('button'); reuse.type = 'button'; reuse.style.cssText = 'justify-self:start;padding:6px 10px;background:#24313a;color:#dce9e8';
+  reuse.onclick = () => { keyframes = structuredClone(selectedConstraints); renderKeyframes(); };
+  const renderKeyframes = message => {
+    reuse.hidden = !selectedConstraints.length;
+    reuse.textContent = `Use the selected animation's ${selectedConstraints.length} constraint${selectedConstraints.length === 1 ? '' : 's'}`;
+    keyframeList.replaceChildren(...keyframes.map((constraint, index) => {
+      const row = document.createElement('div'); row.style.cssText = 'display:grid;grid-template-columns:1fr 74px auto;gap:7px;align-items:center';
+      const label = document.createElement('span'); label.className = 'hint'; label.textContent = constraint.type;
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.title = 'Remove constraint';
+      remove.style.cssText = 'padding:6px 10px;background:#24313a;color:#dce9e8';
+      remove.onclick = () => { keyframes.splice(index, 1); renderKeyframes(); };
+      let frame;
+      if (constraint.frame_indices?.length === 1) {
+        frame = document.createElement('input'); frame.type = 'number'; frame.min = '0'; frame.step = '1'; frame.value = String(constraint.frame_indices[0]);
+        frame.title = 'Frame of the generated clip this pose is reached at';
+        frame.addEventListener('change', () => { constraint.frame_indices = [Math.max(0, Math.floor(Number(frame.value)) || 0)]; frame.value = String(constraint.frame_indices[0]); });
+        label.textContent = `${constraint.type} at frame`;
+      } else {
+        frame = document.createElement('span'); frame.className = 'hint'; frame.textContent = `${constraint.frame_indices?.length ?? 0} frames`;
+      }
+      row.append(label, frame, remove);
+      return row;
+    }));
+    keyframeHint.textContent = message ?? (keyframes.length
+      ? 'Frames count across the whole clip. Pinned poses keep their position on the ground.'
+      : 'Select an animation, scrub to a pose, and pin it to constrain the next generation.');
+  };
+  pin.onclick = () => {
+    const pose = window.kimodoCurrentPose?.();
+    if (!pose) { renderKeyframes('Select a ready animation first.'); return; }
+    const skeletonOf = id => models.find(model => model.id === id)?.skeleton_key;
+    if (skeletonOf(pose.model) !== skeletonOf(select.value)) {
+      renderKeyframes('That pose is from a different skeleton than the selected motion model.'); return;
+    }
+    const rotations = [];
+    for (let i = 0; i < pose.rotations.length; i += 4) rotations.push(pose.rotations.slice(i, i + 4));
+    keyframes.push({type: 'fullbody', frame_indices: [pose.frame], root_positions: [pose.root], local_joints_rot_xyzw: [rotations]});
+    renderKeyframes();
+  };
+  form.insertBefore(constraintRow, generate); form.insertBefore(keyframeList, generate); form.insertBefore(reuse, generate); form.insertBefore(keyframeHint, generate); renderKeyframes();
+
+  // Upstream's post-processing: foot-skate cleanup and IK that lands the
+  // constraints exactly.  On by default, as in NVIDIA's demo, which leaves it
+  // off for the G1 robot.
+  const postRow = document.createElement('label'); postRow.style.cssText = 'display:flex;gap:8px;align-items:center';
+  const postInput = document.createElement('input'); postInput.type = 'checkbox'; postInput.style.cssText = 'width:auto';
+  postRow.title = 'Clean up foot skating and pin constraints exactly with IK after generation';
+  postRow.append(postInput, document.createTextNode('Post-process (foot contacts, exact constraints)'));
+  const postDefault = () => { postInput.checked = models.find(model => model.id === select.value)?.skeleton_key !== 'g1skel34'; };
+  select.addEventListener('change', postDefault); postDefault();
+  form.insertBefore(postRow, generate);
+
   // The gallery owns the selected animation; receive its full saved sequence
   // rather than restoring only animation.prompt (the first segment).
   window.addEventListener('kimodo:restore-sequence', event => {
-    const {segments, model, text_quantization: textQuantization, seed, text_cfg: textCFG} = event.detail || {};
+    const {segments, model, text_quantization: textQuantization, seed, text_cfg: textCFG, constraints, constraint_cfg: constraintCFG, post_processing: postProcessing} = event.detail || {};
     if (seed !== undefined && seed !== null) seedInput.value = String(clampSeed(seed));
     cfgInput.value = String(clampCFG(textCFG ?? defaultCFG));
+    selectedConstraints = Array.isArray(constraints) ? constraints : [];
+    if (selectedConstraints.length) constraintCFGInput.value = String(clampCFG(constraintCFG ?? defaultCFG));
+    renderKeyframes();
     if (model && [...select.options].some(option => option.value === model)) {
       select.value = model;
       updateModel();
     }
+    if (typeof postProcessing === 'boolean') postInput.checked = postProcessing;
     if (textQuantization && [...quantizationSelect.options].some(option => option.value === textQuantization && !option.disabled)) {
       quantizationSelect.value = textQuantization;
       updateQuantization();
@@ -182,6 +255,11 @@ window.addEventListener('load', async () => {
       body.transition_frames = 5;
       body.seed = clampSeed(seedInput.value); seedInput.value = String(body.seed);
       body.text_cfg = clampCFG(cfgInput.value); cfgInput.value = String(body.text_cfg);
+      body.post_processing = postInput.checked;
+      if (keyframes.length) {
+        body.constraints = keyframes;
+        body.constraint_cfg = clampCFG(constraintCFGInput.value); constraintCFGInput.value = String(body.constraint_cfg);
+      }
       body.segments = [...sequence.querySelectorAll('.sequence-prompt')].map(area => {
         const row = area.closest('div');
         const duration = segmentControls.get(row);

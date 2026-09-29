@@ -17,6 +17,10 @@ struct skeleton_spec {
     std::span<const std::array<float, 3>> offsets;
     std::array<unsigned, 2> hips; // right, left
     std::array<unsigned, 4> end_effectors; // left foot, right foot, left hand, right hand
+    // Second joint of each end-effector chain (toe, hand end), -1 when the
+    // chain is one joint long.  Upstream constrains every chain joint's
+    // position but only the first joint's rotation.
+    std::array<int, 4> end_effector_tips;
 
     [[nodiscard]] constexpr std::size_t joints() const noexcept { return names.size(); }
     [[nodiscard]] constexpr std::size_t motion_dim() const noexcept { return 9 + 12 * joints(); }
@@ -87,9 +91,9 @@ inline constexpr std::array<std::array<float,3>,34> g1skel34_offsets{{
     {-.10021F,.24778F,.0039563F},{-.038F,-.013831F,0},{-.00624F,-.1032F,0},
     {0,-.080518F,.015783F},{-.00188791F,-.01F,.1F},{0,0,.038F},{0,0,.046F},{0,0,.1F}}};
 
-inline constexpr skeleton_spec smplx22_spec{"smplx22", smplx22_names, smplx22_parents, smplx22_offsets, {2,1}, {7,8,20,21}};
-inline constexpr skeleton_spec soma30_spec{"soma30", soma30_names, soma30_parents, soma30_offsets, {26,22}, {24,28,13,19}};
-inline constexpr skeleton_spec g1skel34_spec{"g1skel34", g1skel34_names, g1skel34_parents, g1skel34_offsets, {8,1}, {6,13,24,32}};
+inline constexpr skeleton_spec smplx22_spec{"smplx22", smplx22_names, smplx22_parents, smplx22_offsets, {2,1}, {7,8,20,21}, {10,11,-1,-1}};
+inline constexpr skeleton_spec soma30_spec{"soma30", soma30_names, soma30_parents, soma30_offsets, {26,22}, {24,28,13,19}, {25,29,15,21}};
+inline constexpr skeleton_spec g1skel34_spec{"g1skel34", g1skel34_names, g1skel34_parents, g1skel34_offsets, {8,1}, {6,13,24,32}, {7,14,25,33}};
 
 inline constexpr const skeleton_spec *find_skeleton(std::string_view key) noexcept {
     if (key == smplx22_spec.key) return &smplx22_spec;

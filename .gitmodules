@@ -2,3 +2,6 @@
 	path = ggml
 	url = https://github.com/ggml-org/ggml.git
 	branch = master
+[submodule "eigen"]
+	path = eigen
+	url = https://gitlab.com/libeigen/eigen.git

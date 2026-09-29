@@ -49,6 +49,10 @@ var localAILogo []byte
 // client (ContraptionFabricator's Clip Editor) sizes its control from it.
 const minSegmentFrames, maxSegmentFrames = 60, 360
 
+// Upstream's post-processing root margin: how far (metres) a corrected root
+// may stay from a root target.
+const defaultRootMargin = 0.04
+
 // How many finished animations the in-memory gallery keeps (about a quarter
 // of a megabyte each at 360 frames); older ones go.  Queued and running
 // items are never evicted.  Only without -output: a persisted gallery keeps
@@ -56,26 +60,33 @@ const minSegmentFrames, maxSegmentFrames = 60, 360
 const galleryKeep = 64
 
 type animation struct {
-	ID               string          `json:"id"`
-	Prompt           string          `json:"prompt"`
-	Frames           int             `json:"frames"`
-	DiffusionSteps   int             `json:"diffusion_steps"`
-	Seed             uint64          `json:"seed"`
-	CreatedAt        string          `json:"created_at"`
-	Status           string          `json:"status"`
-	Error            string          `json:"error,omitempty"`
-	Kind             string          `json:"kind"`
-	Model            string          `json:"model"`
-	TextQuantization string          `json:"text_quantization"`
-	Segments         []promptSegment `json:"segments,omitempty"`
-	TransitionFrames int             `json:"transition_frames,omitempty"`
-	TextCFG          float64         `json:"text_cfg,omitempty"`
-	Progress         string          `json:"progress,omitempty"`
+	ID               string             `json:"id"`
+	Prompt           string             `json:"prompt"`
+	Frames           int                `json:"frames"`
+	DiffusionSteps   int                `json:"diffusion_steps"`
+	Seed             uint64             `json:"seed"`
+	CreatedAt        string             `json:"created_at"`
+	Status           string             `json:"status"`
+	Error            string             `json:"error,omitempty"`
+	Kind             string             `json:"kind"`
+	Model            string             `json:"model"`
+	TextQuantization string             `json:"text_quantization"`
+	Segments         []promptSegment    `json:"segments,omitempty"`
+	TransitionFrames int                `json:"transition_frames,omitempty"`
+	TextCFG          float64            `json:"text_cfg,omitempty"`
+	Constraints      []motionConstraint `json:"constraints,omitempty"`
+	ConstraintCFG    float64            `json:"constraint_cfg,omitempty"`
+	FirstHeading     float64            `json:"first_heading,omitempty"`
+	PostProcessing   bool               `json:"post_processing"`
+	RootMargin       float64            `json:"root_margin,omitempty"`
+	Progress         string             `json:"progress,omitempty"`
 	// The motion itself, held in memory: the raw streams the viewer plays
 	// and the GLB built from them.  Written to disk only with -output.
 	roots     []float32
 	rotations []float32
 	glb       []byte
+	// The constraints as the worker's field (encodeConstraints).
+	constraintField string
 }
 type promptSegment struct {
 	Prompt string `json:"prompt"`
@@ -93,6 +104,7 @@ type motionModel struct {
 	Available   bool         `json:"available"`
 	Reason      string       `json:"reason,omitempty"`
 	MaxFrames   int          `json:"max_frames"`
+	JointNames  []string     `json:"joint_names"`
 	Parents     []int        `json:"parents"`
 	Offsets     [][3]float32 `json:"offsets"`
 	Motion      string       `json:"-"`
@@ -152,13 +164,32 @@ func (session *generatorSession) close() {
 }
 
 // One request per line to the native worker: transition, steps, seed,
-// text_cfg, then (frames, prompt) pairs with the prompt base64-encoded so a
-// paragraph with tabs or newlines stays one field.  The reply is one line,
+// text_cfg, constraint_cfg, first_heading, post_process (0/1), root_margin,
+// the constraints field (encodeConstraints), then (frames, prompt) pairs with
+// the prompt
+// base64-encoded so a paragraph with tabs or newlines stays one field.  The
+// reply is one line,
 // "OK\tframes\tjoints", followed by the motion as raw little-endian float32
 // (frames*3 root positions, then frames*joints*4 local XYZW rotations), or
 // "ERR\tmessage".  Nothing touches the disk on either side.
 func (session *generatorSession) generate(item *animation, segments []promptSegment) ([]float32, []float32, error) {
-	fields := []string{fmt.Sprint(item.TransitionFrames), fmt.Sprint(item.DiffusionSteps), fmt.Sprint(item.Seed), strconv.FormatFloat(item.TextCFG, 'f', -1, 64)}
+	constraintCFG, constraintField := item.ConstraintCFG, item.constraintField
+	if constraintCFG == 0 {
+		constraintCFG = 2
+	}
+	if constraintField == "" {
+		constraintField = "-"
+	}
+	postProcess, rootMargin := "0", item.RootMargin
+	if item.PostProcessing {
+		postProcess = "1"
+	}
+	if rootMargin == 0 {
+		rootMargin = defaultRootMargin
+	}
+	fields := []string{fmt.Sprint(item.TransitionFrames), fmt.Sprint(item.DiffusionSteps), fmt.Sprint(item.Seed), strconv.FormatFloat(item.TextCFG, 'f', -1, 64),
+		strconv.FormatFloat(constraintCFG, 'f', -1, 64), strconv.FormatFloat(item.FirstHeading, 'f', -1, 64),
+		postProcess, strconv.FormatFloat(rootMargin, 'f', -1, 64), constraintField}
 	for _, segment := range segments {
 		fields = append(fields, fmt.Sprint(segment.Frames), base64.StdEncoding.EncodeToString([]byte(segment.Prompt)))
 	}
@@ -610,7 +641,7 @@ func main() {
 	}
 	makeModel := func(id, label, skeletonLabel, skeletonKey, upstream, license, licenseURL, path string, commercial bool) motionModel {
 		definition := skeletonDefinitions[skeletonKey]
-		model := motionModel{ID: id, Label: label, Skeleton: skeletonLabel, SkeletonKey: skeletonKey, Upstream: upstream, License: license, LicenseURL: licenseURL, Commercial: commercial, MaxFrames: maxSegmentFrames, Parents: definition.parents, Offsets: definition.offsets, Motion: path}
+		model := motionModel{ID: id, Label: label, Skeleton: skeletonLabel, SkeletonKey: skeletonKey, Upstream: upstream, License: license, LicenseURL: licenseURL, Commercial: commercial, MaxFrames: maxSegmentFrames, JointNames: definition.names, Parents: definition.parents, Offsets: definition.offsets, Motion: path}
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 			model.Available = true
 		} else {
@@ -770,18 +801,24 @@ func main() {
 			return
 		}
 		var request struct {
-			Prompt           string          `json:"prompt"`
-			Segments         []promptSegment `json:"segments"`
-			TransitionFrames int             `json:"transition_frames"`
-			Frames           int             `json:"frames"`
-			Steps            int             `json:"steps"`
-			Seed             uint64          `json:"seed"`
-			Model            string          `json:"model"`
-			TextQuantization string          `json:"text_quantization"`
-			TextCFG          float64         `json:"text_cfg"`
+			Prompt           string             `json:"prompt"`
+			Segments         []promptSegment    `json:"segments"`
+			TransitionFrames int                `json:"transition_frames"`
+			Frames           int                `json:"frames"`
+			Steps            int                `json:"steps"`
+			Seed             uint64             `json:"seed"`
+			Model            string             `json:"model"`
+			TextQuantization string             `json:"text_quantization"`
+			TextCFG          float64            `json:"text_cfg"`
+			Constraints      []motionConstraint `json:"constraints"`
+			ConstraintCFG    float64            `json:"constraint_cfg"`
+			FirstHeading     float64            `json:"first_heading"`
+			PostProcessing   *bool              `json:"post_processing"`
+			RootMargin       *float64           `json:"root_margin"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10)).Decode(&request); err != nil {
-			http.Error(w, "invalid JSON", 400)
+		// Room for dense keyframe constraints; a prompt alone is a few KiB.
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&request); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), 400)
 			return
 		}
 		request.Prompt = strings.TrimSpace(request.Prompt)
@@ -815,12 +852,21 @@ func main() {
 			http.Error(w, "transition frames must be 1..60 and steps 1..1000", 400)
 			return
 		}
-		// Upstream's text guidance weight; the native worker keeps the constraint weight at 2.0.
+		// Upstream's separated guidance weights, text and constraint, default 2.0.
 		if request.TextCFG == 0 {
 			request.TextCFG = 2
 		}
-		if math.IsNaN(request.TextCFG) || math.IsInf(request.TextCFG, 0) || request.TextCFG < 0 || request.TextCFG > 20 {
-			http.Error(w, "text_cfg must be in 0..20", 400)
+		if request.ConstraintCFG == 0 {
+			request.ConstraintCFG = 2
+		}
+		for _, weight := range []float64{request.TextCFG, request.ConstraintCFG} {
+			if math.IsNaN(weight) || math.IsInf(weight, 0) || weight < 0 || weight > 20 {
+				http.Error(w, "text_cfg and constraint_cfg must be in 0..20", 400)
+				return
+			}
+		}
+		if math.IsNaN(request.FirstHeading) || math.IsInf(request.FirstHeading, 0) || math.Abs(request.FirstHeading) > 1000 {
+			http.Error(w, "first_heading must be a finite angle in radians", 400)
 			return
 		}
 		if request.Model == "" {
@@ -847,10 +893,31 @@ func main() {
 		for _, segment := range request.Segments {
 			totalFrames += segment.Frames
 		}
-		a := &animation{ID: token(), Prompt: request.Segments[0].Prompt, Frames: totalFrames, DiffusionSteps: request.Steps, Seed: request.Seed, CreatedAt: time.Now().UTC().Format(time.RFC3339), Status: "queued", Kind: "generated", Model: request.Model, TextQuantization: request.TextQuantization, Segments: request.Segments, TransitionFrames: request.TransitionFrames, TextCFG: request.TextCFG}
+		joints := len(model.JointNames)
+		constraints, err := parseConstraints(request.Constraints, model.SkeletonKey, joints, totalFrames)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		// Upstream's demo post-processes by default, except on the G1 robot.
+		postProcessing := model.SkeletonKey != "g1skel34"
+		if request.PostProcessing != nil {
+			postProcessing = *request.PostProcessing
+		}
+		rootMargin := defaultRootMargin
+		if request.RootMargin != nil {
+			rootMargin = *request.RootMargin
+		}
+		if math.IsNaN(rootMargin) || rootMargin < 0 || rootMargin > 1 {
+			http.Error(w, "root_margin must be 0..1 metres", 400)
+			return
+		}
+		a := &animation{ID: token(), Prompt: request.Segments[0].Prompt, Frames: totalFrames, DiffusionSteps: request.Steps, Seed: request.Seed, CreatedAt: time.Now().UTC().Format(time.RFC3339), Status: "queued", Kind: "generated", Model: request.Model, TextQuantization: request.TextQuantization, Segments: request.Segments, TransitionFrames: request.TransitionFrames, TextCFG: request.TextCFG,
+			Constraints: request.Constraints, ConstraintCFG: request.ConstraintCFG, FirstHeading: request.FirstHeading, constraintField: encodeConstraints(joints, constraints),
+			PostProcessing: postProcessing, RootMargin: rootMargin}
 		g.mu.Lock()
 		g.items[a.ID] = a
-		err := g.save(a)
+		err = g.save(a)
 		g.mu.Unlock()
 		if err != nil {
 			http.Error(w, err.Error(), 500)

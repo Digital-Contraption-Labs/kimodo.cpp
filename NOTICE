@@ -3,5 +3,12 @@ kimodo.cpp
 This project uses ggml, Copyright the ggml authors:
 https://github.com/ggml-org/ggml
 
+third_party/motion_correction is NVIDIA Kimodo's MotionCorrection library,
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES, Apache-2.0:
+https://github.com/nv-tlabs/kimodo
+
+Post-processing uses Eigen (MPL-2.0, built with EIGEN_MPL2_ONLY):
+https://gitlab.com/libeigen/eigen
+
 The demo displays the LocalAI logo from the LocalAI project:
 https://github.com/mudler/LocalAI

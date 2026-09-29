@@ -18,17 +18,19 @@ the model actually predicts. The text encoder uses eight-layer Vulkan chunks by
 default; set `KIMODO_TEXT_LAYER_CHUNK=1..32` to tune VRAM use.
 
 Included: checked GGUF loading, safetensors conversion, DDIM sampling, C/C++
-APIs, conditioned multi-prompt transitions, CPU/Vulkan parity tests,
+APIs, conditioned multi-prompt transitions, kinematic constraints (full-body
+keyframes, end effectors, root paths and waypoints), CPU/Vulkan parity tests,
 skeleton-only GLB export, selective LLM2Vec quantisation, divergence reporting,
-and local generation/comparison viewers. General constraint input, 77-joint
-SOMA expansion, skinned-mesh GLB export, and motion-denoiser quantisation are
-not implemented yet.
+upstream's post-processing (foot-skate cleanup and IK onto constraints, x86
+only), and local generation/comparison viewers. 77-joint SOMA expansion,
+skinned-mesh GLB export, and motion-denoiser quantisation are not implemented
+yet.
 
 ## Build and test on Linux
 
 Install a C++23 compiler, CMake 3.25+, Ninja, Python 3 with the Hugging Face
 CLI (`pip install huggingface_hub`), and the Vulkan loader/headers for Vulkan
-support. GGML is a pinned Git submodule:
+support. GGML and Eigen (for post-processing) are pinned Git submodules:
 
 ```sh
 git submodule update --init --recursive
@@ -71,7 +73,8 @@ beside `tokenizer.gguf` or the legacy component directory. Use
 `kimodo_generate_embedding` for
 4096 F32 values or `kimodo_generate` for text. Both return the selected model's
 root translations and local XYZW rotations; query the joint count from the
-result rather than assuming a fixed skeleton.
+result rather than assuming a fixed skeleton. `kimodo_generate_constrained`
+adds kinematic constraints; see [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md).
 
 ## Demo
 
@@ -96,6 +99,14 @@ selected animated node hierarchy (no mesh), ready to copy into a Three.js
 project; it is available from `/api/animations/<animation-id>/animation.glb`
 while the demo is running. Segments may be 60..360 frames (2..12 s at
 30 fps).
+
+`POST /api/generate` also takes kinematic constraints in NVIDIA Kimodo's
+constraints JSON, so a file saved from the upstream demo posts unchanged; the
+page's "Pin current pose" turns the pose on screen into a keyframe for the next
+generation. Like NVIDIA's demo, the server post-processes by default (not on
+G1): foot-skate cleanup and IK that land constraints exactly; send
+`"post_processing": false` for the raw diffusion output. The request format and
+what to expect are in [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md).
 
 On Windows, `start-demo.bat` builds and runs the demo with the persistent
 gallery and opens the page; `start-server.bat` runs the service alone, in

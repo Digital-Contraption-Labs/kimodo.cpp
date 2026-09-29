@@ -1,6 +1,7 @@
 #include <kimodo/kimodo_capi.h>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -31,7 +32,7 @@ static void motion_gguf(const char *path) {
 }
 
 int main(int argc, char **argv) {
-    assert(kimodo_abi_version() == 1);
+    assert(kimodo_abi_version() == 2);
     char error[64];
     auto *model = kimodo_model_load("does-not-exist.gguf", nullptr, nullptr, nullptr, error, sizeof(error));
     assert(model == nullptr && std::strlen(error) > 0);
@@ -77,6 +78,49 @@ int main(int argc, char **argv) {
             assert(kimodo_motion_frames(motion) == 2);
             assert(kimodo_motion_joints(motion) == 22);
             kimodo_motion_free(motion);
+
+            // A root waypoint through the C constraint structs; release
+            // builds drop assert, so these checks report themselves.
+            const uint32_t frames[]{1};
+            const float waypoint[]{.1f, .2f};
+            kimodo_constraint constraint{};
+            constraint.size = sizeof(constraint);
+            constraint.type = KIMODO_CONSTRAINT_ROOT2D;
+            constraint.frame_count = 1;
+            constraint.frames = frames;
+            constraint.smooth_root_2d = waypoint;
+            kimodo_constraints constraints{sizeof(constraints), &constraint, 1};
+            motion = kimodo_generate_constrained(loaded, "A person walks forward.", &options, &constraints, error, sizeof(error));
+            if (!motion || kimodo_motion_frames(motion) != 2 || kimodo_motion_joints(motion) != kimodo_model_joints(loaded)) {
+                std::fprintf(stderr, "constrained generation failed: %s\n", error);
+                return 1;
+            }
+            kimodo_motion_free(motion);
+            // Post-processed onto the waypoint; a version-1 options size
+            // still generates, without the ABI-2 fields.
+            kimodo_generation_options post = options;
+            post.frames = 30;
+            post.post_process = 1;
+            post.root_margin = .04f;
+            motion = kimodo_generate_constrained(loaded, "A person walks forward.", &post, &constraints, error, sizeof(error));
+            if (!motion || kimodo_motion_frames(motion) != 30) {
+                std::fprintf(stderr, "post-processed generation failed: %s\n", error);
+                return 1;
+            }
+            kimodo_motion_free(motion);
+            kimodo_generation_options v1 = options;
+            v1.size = offsetof(kimodo_generation_options, first_heading);
+            motion = kimodo_generate(loaded, "A person walks forward.", &v1, error, sizeof(error));
+            if (!motion) {
+                std::fprintf(stderr, "version-1 options were rejected: %s\n", error);
+                return 1;
+            }
+            kimodo_motion_free(motion);
+            constraint.frames = nullptr;
+            if (kimodo_generate_constrained(loaded, "A person walks forward.", &options, &constraints, error, sizeof(error))) {
+                std::fprintf(stderr, "a constraint without frames was accepted\n");
+                return 1;
+            }
         }
         kimodo_model_free(loaded);
     }
