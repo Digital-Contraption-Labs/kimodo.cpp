@@ -129,7 +129,9 @@ the local cache into `dist\kimodo-windows`. `scripts\build\stage_to_cf.bat
 `build_library_linux.sh` (or `.bat`, through WSL) and `build_library_android`
 (`.bat` or `.sh`, with the NDK) build the Linux and Android packages the same
 way; the Linux and Android builds compile against the pinned `vulkan-headers`
-and `spirv-headers` submodules. The plan for
+and `spirv-headers` submodules. On a Mac, `build_library_macos.sh` builds
+`libkimodo.dylib` and `build_library_ios.sh` `kimodo.xcframework`, both on
+ggml's Metal backend. The plan for
 the library and its other platforms is in
 [`docs/SHARED_LIBRARY_PLAN.md`](docs/SHARED_LIBRARY_PLAN.md).
 

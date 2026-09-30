@@ -48,7 +48,8 @@ typedef struct kimodo_motion kimodo_motion;
 typedef enum kimodo_device {
     KIMODO_DEVICE_AUTO = 0,     /* the GPU when there is a usable one, else the CPU */
     KIMODO_DEVICE_CPU = 1,
-    KIMODO_DEVICE_VULKAN = 2,
+    KIMODO_DEVICE_VULKAN = 2,   /* Windows, Linux, Android */
+    KIMODO_DEVICE_METAL = 3,    /* macOS, iOS (ABI 3) */
 } kimodo_device;
 
 typedef struct kimodo_runtime_options {
@@ -57,7 +58,7 @@ typedef struct kimodo_runtime_options {
     kimodo_device device;
     const char *backend_dir;    /* unused: every backend is built into the library */
     /* ABI 3 */
-    uint32_t gpu_index;         /* which GPU, 0..kimodo_gpu_count()-1 */
+    uint32_t gpu_index;         /* which GPU, 0..kimodo_gpu_count()-1 (Metal: 0) */
     /* Text encoder layers kept on the device at once: 0 decides (all 32 when
      * the device has room for them beside the motion model, else 8), 1..32
      * sets it; 32 keeps the whole encoder resident. */
@@ -252,7 +253,8 @@ typedef void (*kimodo_log_fn)(void *user_data, kimodo_log_level level, const cha
  */
 KIMODO_API void kimodo_set_log_callback(kimodo_log_fn callback, void *user_data, kimodo_log_level min_level);
 
-/* GPUs the Vulkan backend can use, in gpu_index order; 0 without one. */
+/* GPUs the library can use, in gpu_index order (Vulkan's; Metal's one on
+ * Apple); 0 without one. */
 KIMODO_API int kimodo_gpu_count(void);
 
 typedef struct kimodo_gpu_info {

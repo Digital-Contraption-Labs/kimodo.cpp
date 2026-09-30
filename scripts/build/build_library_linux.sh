@@ -87,7 +87,8 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     exit 1
 fi
 cmake_version="$(cmake --version | head -1 | awk '{print $3}')"
-if [[ "$(printf '%s\n3.25\n' "$cmake_version" | sort -V | head -1)" != 3.25 ]]; then
+IFS=. read -r cmake_major cmake_minor _ <<<"$cmake_version"
+if (( cmake_major < 3 || (cmake_major == 3 && cmake_minor < 25) )); then
     echo "CMake $cmake_version is too old: 3.25 or later is needed." >&2
     exit 1
 fi

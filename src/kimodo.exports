@@ -1,0 +1,3 @@
+# libkimodo.dylib's and kimodo.framework's exports on Apple (ld's
+# -exported_symbols_list): the C API and nothing else.
+_kimodo_*

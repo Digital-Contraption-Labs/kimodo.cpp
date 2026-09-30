@@ -588,6 +588,68 @@ decisions of section 2.
   checked and packaged; not yet run on a device.
 - Every package now carries `tools/kimodo-capi-smoke`.
 
+**Steps 6 and 7, macOS and iOS: written 2026-09-29, not yet built.**  No Mac
+was at hand, so nothing Apple-specific has been compiled or run.
+
+- Engine: `KIMODO_DEVICE_METAL` (appended to the enum); `start_backend`
+  starts ggml's Metal backend on Apple (one GPU, index 0; no parity
+  switches), `kimodo_gpu_count` and `kimodo_gpu_info_get` report its device,
+  and the capabilities carry its bit.  These paths pass a GCC syntax check
+  against ggml's real `ggml-metal.h`.
+- CMake: Vulkan off and Metal on for Apple, `GGML_METAL_EMBED_LIBRARY` (the
+  shader source goes into the library and the device compiles it at run
+  time: no Metal toolchain at build time, one approach for macOS and iOS),
+  `GGML_BLAS` off.  Exports through `src/kimodo.exports`.  On iOS the library
+  is a framework (`MACOSX_FRAMEWORK_INFO_PLIST` adds `MinimumOSVersion`),
+  and `build_library_ios.sh` joins the device and simulator builds with
+  `xcodebuild -create-xcframework`.  Presets: `macos-*` (arm64, macOS 13.3)
+  and `ios-device-*`, `ios-simulator-*` (arm64, iOS 16.4; the versions
+  llama.cpp's own XCFramework uses).  Post-processing is the ARM64 route
+  checked under QEMU above.
+- `package.cmake`'s Mach-O checks (`nm -gU`, `otool -L`) were run against
+  sample output in both tools' formats; the scripts pass `bash -n` and
+  `shellcheck`.
+- The parity run on Metal is still to do: Metal compiles ggml's shaders
+  with fast math, so its results will differ from Vulkan's and the CPU's;
+  how much is the question.
+
+To run on the Mac, from the repository root, in order:
+
+1. `scripts/build/build_library_macos.sh`
+   Configures and builds, then prints `libkimodo.dylib exports 29 kimodo_*
+   functions and nothing else`, a `libkimodo.dylib loads ...` line naming
+   only `/usr/lib` libraries and `/System/Library/Frameworks` (Metal,
+   Foundation, Accelerate among them), `Packaged ...`, then `abi 3 (header
+   3)`, `library 0.1.0 (commit ...): CPU + Metal, post-processing yes`, a
+   `GPU 0:` line naming the Mac's GPU, and `ok`.
+2. The command it prints last:
+   `dist/kimodo-macos/tools/kimodo-capi-smoke --library dist/kimodo-macos/lib/libkimodo.dylib --data dist/kimodo-macos/weights --frames 90 --steps 20 --keyframe --embedding --log`
+   Expect a `GPU 0:` line naming the Mac's GPU, `[kimodo info] text encoder:
+   all 32 layers resident ...` (on a Mac with 16 GB or more), a `clip:` line,
+   the keyframe lines ending `hips 0.0 mm from the target ... worst joint 0.0
+   degrees off` for the post-processed clip, `struct and JSON constraints
+   give the same clip`, an `embedding:` line, and `ok`.  Then the same with
+   `--cpu` added, to compare.
+3. `scripts/build/build_library_ios.sh`
+   Builds both slices, prints `Joining the frameworks ...`, `kimodo exports
+   29 kimodo_* functions and nothing else`, the frameworks it loads, and
+   `Packaged ...`.  Running it needs an app.
+
+Report any failure's last 30 lines; the likely places are ggml's Metal
+build under Ninja for iOS, and the exported-symbols list.
+
+**Step 8, packaging and staging, done 2026-09-29.**  Every target packages
+through `scripts/build/package.cmake`; `stage_to_cf.bat` (Windows) and
+`stage_to_cf.sh` (macOS, Linux) copy a package to
+`<CF>/external/kimodo/<target>/` and its weights to `<CF>/Assets/kimodo/`,
+both tested against a stand-in CF tree (the library folder mirrored, CF's own
+files in `Assets/kimodo` kept, a folder without `Assets/` refused).  Not yet
+run against CF itself.
+
+Open, besides section 12's questions: the iOS deployment target (16.4) and
+the framework's bundle identifier (`org.kimodo-cpp.kimodo`, the CMake cache
+variable `KIMODO_FRAMEWORK_IDENTIFIER`) are placeholders for CF's own.
+
 ## 12. Questions that are the owner's to answer
 
 Answered on 2026-09-29; see "Decisions" in section 2.  Still open, none of

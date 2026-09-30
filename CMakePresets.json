@@ -68,6 +68,60 @@
         "ANDROID_STL": "c++_static",
         "ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES": "ON"
       }
+    },
+    {
+      "name": "macos-release",
+      "inherits": "release",
+      "displayName": "macOS arm64 Release (Apple Clang + Ninja)",
+      "description": "libkimodo.dylib for Apple Silicon, Metal, macOS 13.3 and later. scripts/build/build_library_macos.sh.",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"},
+      "binaryDir": "${sourceDir}/build/macos-release",
+      "cacheVariables": {"CMAKE_OSX_ARCHITECTURES": "arm64", "CMAKE_OSX_DEPLOYMENT_TARGET": "13.3"}
+    },
+    {
+      "name": "macos-debug",
+      "inherits": "debug",
+      "displayName": "macOS arm64 Debug (Apple Clang + Ninja)",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"},
+      "binaryDir": "${sourceDir}/build/macos-debug",
+      "cacheVariables": {"CMAKE_OSX_ARCHITECTURES": "arm64", "CMAKE_OSX_DEPLOYMENT_TARGET": "13.3"}
+    },
+    {
+      "name": "ios-device-release",
+      "inherits": "release",
+      "displayName": "iOS device arm64 Release",
+      "description": "kimodo.framework for iPhone and iPad, Metal, iOS 16.4 and later. scripts/build/build_library_ios.sh joins it with the simulator's.",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"},
+      "binaryDir": "${sourceDir}/build/ios-device-release",
+      "cacheVariables": {"CMAKE_SYSTEM_NAME": "iOS", "CMAKE_OSX_SYSROOT": "iphoneos", "CMAKE_OSX_ARCHITECTURES": "arm64",
+                         "CMAKE_OSX_DEPLOYMENT_TARGET": "16.4", "KIMODO_BUILD_TESTS": "OFF"}
+    },
+    {
+      "name": "ios-simulator-release",
+      "inherits": "release",
+      "displayName": "iOS simulator arm64 Release",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"},
+      "binaryDir": "${sourceDir}/build/ios-simulator-release",
+      "cacheVariables": {"CMAKE_SYSTEM_NAME": "iOS", "CMAKE_OSX_SYSROOT": "iphonesimulator", "CMAKE_OSX_ARCHITECTURES": "arm64",
+                         "CMAKE_OSX_DEPLOYMENT_TARGET": "16.4", "KIMODO_BUILD_TESTS": "OFF"}
+    },
+    {
+      "name": "ios-device-debug",
+      "inherits": "debug",
+      "displayName": "iOS device arm64 Debug",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"},
+      "binaryDir": "${sourceDir}/build/ios-device-debug",
+      "cacheVariables": {"CMAKE_SYSTEM_NAME": "iOS", "CMAKE_OSX_SYSROOT": "iphoneos", "CMAKE_OSX_ARCHITECTURES": "arm64",
+                         "CMAKE_OSX_DEPLOYMENT_TARGET": "16.4", "KIMODO_BUILD_TESTS": "OFF"}
+    },
+    {
+      "name": "ios-simulator-debug",
+      "inherits": "debug",
+      "displayName": "iOS simulator arm64 Debug",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"},
+      "binaryDir": "${sourceDir}/build/ios-simulator-debug",
+      "cacheVariables": {"CMAKE_SYSTEM_NAME": "iOS", "CMAKE_OSX_SYSROOT": "iphonesimulator", "CMAKE_OSX_ARCHITECTURES": "arm64",
+                         "CMAKE_OSX_DEPLOYMENT_TARGET": "16.4", "KIMODO_BUILD_TESTS": "OFF"}
     }
   ],
   "buildPresets": [
@@ -81,7 +135,13 @@
     {"name": "linux-library-release", "configurePreset": "linux-release", "targets": ["kimodo", "kimodo-capi-smoke"]},
     {"name": "linux-library-debug", "configurePreset": "linux-debug", "targets": ["kimodo", "kimodo-capi-smoke"]},
     {"name": "android-arm64-library-release", "configurePreset": "android-arm64-release", "targets": ["kimodo", "kimodo-capi-smoke"]},
-    {"name": "android-arm64-library-debug", "configurePreset": "android-arm64-debug", "targets": ["kimodo", "kimodo-capi-smoke"]}
+    {"name": "android-arm64-library-debug", "configurePreset": "android-arm64-debug", "targets": ["kimodo", "kimodo-capi-smoke"]},
+    {"name": "macos-library-release", "configurePreset": "macos-release", "targets": ["kimodo", "kimodo-capi-smoke"]},
+    {"name": "macos-library-debug", "configurePreset": "macos-debug", "targets": ["kimodo", "kimodo-capi-smoke"]},
+    {"name": "ios-device-library-release", "configurePreset": "ios-device-release", "targets": ["kimodo"]},
+    {"name": "ios-simulator-library-release", "configurePreset": "ios-simulator-release", "targets": ["kimodo"]},
+    {"name": "ios-device-library-debug", "configurePreset": "ios-device-debug", "targets": ["kimodo"]},
+    {"name": "ios-simulator-library-debug", "configurePreset": "ios-simulator-debug", "targets": ["kimodo"]}
   ],
   "testPresets": [
     {"name":"debug","configurePreset":"debug","output":{"outputOnFailure":true}},

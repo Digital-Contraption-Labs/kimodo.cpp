@@ -2,11 +2,11 @@
 # (docs/SHARED_LIBRARY_PLAN.md, section 8).  The platform build scripts in
 # this folder run it after their build:
 #
-#   cmake -DKIMODO_TARGET=windows|linux|android -DKIMODO_SOURCE_DIR=<repository>
+#   cmake -DKIMODO_TARGET=windows|linux|android|macos|ios -DKIMODO_SOURCE_DIR=<repository>
 #         -DKIMODO_BUILD_DIR=<build folder> -DKIMODO_PACKAGE_DIR=<package folder>
 #         [-DKIMODO_WEIGHTS=OFF] [-DKIMODO_TEXT_WEIGHTS=OFF] [-DKIMODO_WEIGHTS_DIR=<weights cache>]
 #         [-DKIMODO_ANDROID_ABI=arm64-v8a] [-DKIMODO_NM=<nm>] [-DKIMODO_READELF=<readelf>]
-#         [-DKIMODO_STRIP=<strip>]
+#         [-DKIMODO_STRIP=<strip>] [-DKIMODO_XCFRAMEWORK=<kimodo.xcframework>]
 #         -P scripts/build/package.cmake
 #
 # The package:
@@ -17,6 +17,8 @@
 #   lib/<abi>/libkimodo.so, symbols/<abi>/libkimodo.so (android: stripped as
 #                           jniLibs lays it out, and with its symbols for
 #                           reading crash reports)
+#   lib/libkimodo.dylib                                (macos)
+#   lib/kimodo.xcframework  device and simulator frameworks (ios)
 #   tools/kimodo-capi-smoke    loads the library and generates a clip, to check
 #                              an install (on Android, run it through adb)
 #   LICENSE  NOTICE  THIRD_PARTY.md  licenses/
@@ -34,8 +36,8 @@
 #
 # The library is checked before it is packaged: it must export kimodo_* and
 # nothing else, and import only the system's libraries, its C/C++ runtime and
-# the Vulkan loader (dumpbin on Windows, nm and readelf on ELF targets).  A
-# failed check stops the packaging.
+# the GPU's (dumpbin on Windows, nm and readelf on ELF targets, nm and otool
+# on Apple's).  A failed check stops the packaging.
 
 cmake_minimum_required(VERSION 3.25)
 
@@ -118,6 +120,7 @@ endfunction()
 
 # ---- The library ---------------------------------------------------------
 set(elf FALSE)
+set(macho FALSE)
 set(strip_library "")
 if(KIMODO_TARGET STREQUAL "windows")
   set(binaries "bin/kimodo.dll" "bin/kimodo.pdb" "lib/kimodo.lib" "tools/kimodo-capi-smoke.exe")
@@ -138,6 +141,24 @@ elseif(KIMODO_TARGET STREQUAL "android")
   set(strip_library "lib/${abi}/libkimodo.so")
   # Bionic and the Vulkan loader; the C++ runtime is c++_static.
   set(allowed_imports "^(libc|libm|libdl|liblog|libvulkan|libandroid)\\.so$")
+elseif(KIMODO_TARGET STREQUAL "macos")
+  set(macho TRUE)
+  set(binaries "lib/libkimodo.dylib" "tools/kimodo-capi-smoke")
+  set(sources "${build}/libkimodo.dylib" "${build}/kimodo-capi-smoke")
+  list(GET sources 0 macho_binary)
+  set(own_install_name "@rpath/libkimodo.dylib")
+elseif(KIMODO_TARGET STREQUAL "ios")
+  # The XCFramework build_library_ios.sh made from the device and simulator
+  # frameworks; its device slice is what gets checked.
+  if(NOT KIMODO_XCFRAMEWORK)
+    message(FATAL_ERROR "package.cmake needs -DKIMODO_XCFRAMEWORK=<kimodo.xcframework> for ios")
+  endif()
+  file(TO_CMAKE_PATH "${KIMODO_XCFRAMEWORK}" KIMODO_XCFRAMEWORK)
+  set(macho TRUE)
+  set(binaries "lib/kimodo.xcframework")
+  set(sources "${KIMODO_XCFRAMEWORK}")
+  set(macho_binary "${KIMODO_XCFRAMEWORK}/ios-arm64/kimodo.framework/kimodo")
+  set(own_install_name "@rpath/kimodo.framework/kimodo")
 else()
   message(FATAL_ERROR "package.cmake does not package '${KIMODO_TARGET}' yet")
 endif()
@@ -290,6 +311,66 @@ if(elf)
   endif()
 endif()
 
+if(macho)
+  get_filename_component(library_name "${macho_binary}" NAME)
+  if(NOT EXISTS "${macho_binary}")
+    message(FATAL_ERROR "${macho_binary} not found")
+  endif()
+  find_program(KIMODO_NM nm)
+  find_program(KIMODO_OTOOL otool)
+  if(NOT KIMODO_NM OR NOT KIMODO_OTOOL)
+    message(FATAL_ERROR "nm and otool are needed to check ${library_name}: install Xcode's command line tools (xcode-select --install)")
+  endif()
+  execute_process(COMMAND "${KIMODO_NM}" -gU "${macho_binary}" OUTPUT_VARIABLE dump RESULT_VARIABLE result)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "nm -gU failed on ${macho_binary}")
+  endif()
+  string(REGEX MATCHALL "[0-9a-fA-F]+ [A-Za-z] [^ \r\n]+" rows "${dump}")
+  set(exports)
+  set(foreign)
+  foreach(row IN LISTS rows)
+    string(REGEX REPLACE "^[0-9a-fA-F]+ [A-Za-z] " "" name "${row}")
+    list(APPEND exports "${name}")
+    if(NOT name MATCHES "^_kimodo_")
+      list(APPEND foreign "${name}")
+    endif()
+  endforeach()
+  list(LENGTH exports export_count)
+  if(export_count EQUAL 0)
+    message(FATAL_ERROR "${library_name} exports nothing")
+  endif()
+  if(foreign)
+    list(JOIN foreign ", " foreign)
+    message(FATAL_ERROR "${library_name} exports symbols outside the C API: ${foreign}")
+  endif()
+  # Its own install name comes first, then what it loads: only the system's
+  # libc++, libSystem, the Objective-C runtime and system frameworks (Metal,
+  # Foundation, Accelerate) may be among them.
+  execute_process(COMMAND "${KIMODO_OTOOL}" -L "${macho_binary}" OUTPUT_VARIABLE dump RESULT_VARIABLE result)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "otool -L failed on ${macho_binary}")
+  endif()
+  string(REGEX MATCHALL "\n[ \t]+[^ \t\r\n]+ \\(compatibility" rows "${dump}")
+  set(unexpected)
+  foreach(row IN LISTS rows)
+    string(REGEX REPLACE "^\n[ \t]+([^ \t]+) \\(compatibility$" "\\1" name "${row}")
+    if(name STREQUAL own_install_name)
+      continue()
+    endif()
+    list(APPEND imports "${name}")
+    if(NOT name MATCHES "^(/usr/lib/libc\\+\\+\\.1\\.dylib|/usr/lib/libSystem\\.B\\.dylib|/usr/lib/libobjc\\.A\\.dylib|/System/Library/Frameworks/[A-Za-z]+\\.framework/.+)$")
+      list(APPEND unexpected "${name}")
+    endif()
+  endforeach()
+  if(unexpected)
+    list(JOIN unexpected ", " unexpected)
+    message(FATAL_ERROR "${library_name} depends on libraries a host would have to ship as well: ${unexpected}")
+  endif()
+  message(STATUS "${library_name} exports ${export_count} kimodo_* functions and nothing else")
+  list(JOIN imports ", " import_text)
+  message(STATUS "${library_name} loads ${import_text}")
+endif()
+
 # Start clean, except for the weights, which are copied only when they
 # change, and WEIGHTS.md, which describes them.
 file(MAKE_DIRECTORY "${out}")
@@ -369,6 +450,9 @@ json_array(imports_json ${imports})
 set(glibc_json "")
 if(glibc)
   set(glibc_json ",\n  \"glibc\": \"${glibc}\"")
+endif()
+if(KIMODO_BUILD_MINIMUM_OS)
+  string(APPEND glibc_json ",\n  \"minimum_os\": \"${KIMODO_BUILD_MINIMUM_OS}\"")
 endif()
 file(WRITE "${out}/VERSION.json" "{
   \"target\": \"${KIMODO_TARGET}\",

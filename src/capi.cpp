@@ -113,6 +113,7 @@ std::expected<kimodo::runtime_options, std::string> runtime_options(const kimodo
     case KIMODO_DEVICE_AUTO: out.backend = kimodo::device::automatic; break;
     case KIMODO_DEVICE_CPU: out.backend = kimodo::device::cpu; break;
     case KIMODO_DEVICE_VULKAN: out.backend = kimodo::device::vulkan; break;
+    case KIMODO_DEVICE_METAL: out.backend = kimodo::device::metal; break;
     default: return std::unexpected("unknown kimodo_device " + std::to_string(static_cast<int>(o->device)));
     }
     if (o->size == sizeof(*o)) {
@@ -242,6 +243,7 @@ int kimodo_get_capabilities(kimodo_capabilities *out) {
     out->commit = build.commit.data();
     out->devices = 1u << KIMODO_DEVICE_CPU;
     if (build.vulkan) out->devices |= 1u << KIMODO_DEVICE_VULKAN;
+    if (build.metal) out->devices |= 1u << KIMODO_DEVICE_METAL;
     out->post_processing = build.post_processing ? 1u : 0u;
     return 0;
 }

@@ -661,8 +661,9 @@ static int run(int argc, char **argv) {
     memset(&capabilities, 0, sizeof capabilities);
     capabilities.size = sizeof capabilities;
     if (api.get_capabilities(&capabilities) != 0) fail("kimodo_get_capabilities");
-    printf("library %s (commit %s): CPU%s, post-processing %s\n", capabilities.version, capabilities.commit,
-           capabilities.devices & (1u << KIMODO_DEVICE_VULKAN) ? " + Vulkan" : "", capabilities.post_processing ? "yes" : "no");
+    printf("library %s (commit %s): CPU%s%s, post-processing %s\n", capabilities.version, capabilities.commit,
+           capabilities.devices & (1u << KIMODO_DEVICE_VULKAN) ? " + Vulkan" : "",
+           capabilities.devices & (1u << KIMODO_DEVICE_METAL) ? " + Metal" : "", capabilities.post_processing ? "yes" : "no");
     const int gpus = api.gpu_count();
     for (int index = 0; index < gpus; ++index) {
         kimodo_gpu_info gpu;

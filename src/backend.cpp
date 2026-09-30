@@ -13,6 +13,9 @@
 #if defined(KIMODO_HAVE_GGML_VULKAN)
 #include <ggml-vulkan.h>
 #endif
+#if defined(KIMODO_HAVE_GGML_METAL)
+#include <ggml-metal.h>
+#endif
 
 namespace kimodo::detail {
 namespace {
@@ -86,6 +89,17 @@ std::expected<ggml_backend *, std::string> start_backend(const runtime_options &
 #else
     (void) f32_parity;
     if (options.backend == device::vulkan) return std::unexpected("this build has no Vulkan backend");
+#endif
+#if defined(KIMODO_HAVE_GGML_METAL)
+    // Apple: Metal drives the machine's one GPU; it has no parity switches.
+    if (!backend && options.backend != device::cpu && options.backend != device::vulkan) {
+        if (options.gpu_index != 0)
+            return std::unexpected("gpu_index " + std::to_string(options.gpu_index) + " is out of range: Metal drives one GPU, 0");
+        backend = ggml_backend_metal_init();
+        if (!backend && options.backend == device::metal) return std::unexpected("cannot start Metal");
+    }
+#else
+    if (options.backend == device::metal) return std::unexpected("this build has no Metal backend");
 #endif
     if (!backend) {
         backend = ggml_backend_cpu_init();

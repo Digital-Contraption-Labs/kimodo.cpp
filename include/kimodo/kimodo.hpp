@@ -75,13 +75,14 @@ enum class device : std::uint32_t {
     automatic = KIMODO_DEVICE_AUTO,           // the GPU when there is a usable one
     cpu = KIMODO_DEVICE_CPU,
     vulkan = KIMODO_DEVICE_VULKAN,
+    metal = KIMODO_DEVICE_METAL,
 };
 
 // How a model runs.  These are the library's only levers: it reads no
 // environment variables (the tools translate theirs into these).
 struct runtime_options {
     device backend = device::automatic;
-    unsigned gpu_index = 0;                   // among the Vulkan backend's GPUs
+    unsigned gpu_index = 0;                   // among the GPUs list_gpus() reports
     unsigned threads = 0;                     // CPU threads; 0 uses every hardware thread
     // Text encoder layers on the device at once: 0 decides (all 32 when the
     // device has room beside the motion model, else 8), 1..32 sets it.
@@ -138,11 +139,13 @@ struct build_information {
     std::string_view version;                 // the project's version
     std::string_view commit;                  // the source commit, when known at configure time
     bool vulkan = false;                      // the Vulkan backend is built in
+    bool metal = false;                       // the Metal backend is built in (Apple)
     bool post_processing = false;             // see model::post_processing_available
 };
 [[nodiscard]] build_information build() noexcept;
 
-// The GPUs the Vulkan backend can use, in gpu_index order.
+// The GPUs the library can use, in gpu_index order: Vulkan's, or Metal's
+// one on Apple.
 struct gpu_description {
     std::string name;
     std::uint64_t memory_total = 0;           // bytes
