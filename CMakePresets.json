@@ -4,8 +4,43 @@
     {"name":"debug","generator":"Ninja","binaryDir":"${sourceDir}/build/debug","cacheVariables":{"CMAKE_BUILD_TYPE":"Debug"}},
     {"name":"release","generator":"Ninja","binaryDir":"${sourceDir}/build/release","cacheVariables":{"CMAKE_BUILD_TYPE":"Release"}},
     {"name":"asan-ubsan","inherits":"debug","binaryDir":"${sourceDir}/build/asan-ubsan","cacheVariables":{"CMAKE_CXX_FLAGS":"-O0 -fsanitize=address,undefined -fno-omit-frame-pointer","CMAKE_EXE_LINKER_FLAGS":"-fsanitize=address,undefined"}},
-    {"name":"fuzz","inherits":"debug","binaryDir":"${sourceDir}/build/fuzz","cacheVariables":{"CMAKE_CXX_COMPILER":"clang++","KIMODO_BUILD_TESTS":"OFF","KIMODO_ENABLE_FUZZERS":"ON"}}
+    {"name":"fuzz","inherits":"debug","binaryDir":"${sourceDir}/build/fuzz","cacheVariables":{"CMAKE_CXX_COMPILER":"clang++","KIMODO_BUILD_TESTS":"OFF","KIMODO_ENABLE_FUZZERS":"ON"}},
+    {
+      "name": "windows-release",
+      "inherits": "release",
+      "displayName": "Windows Release (MSVC + Ninja)",
+      "description": "Run from a VS 2022 x64 developer shell, or through scripts/build. Places every executable and kimodo.dll in build/release.",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"},
+      "cacheVariables": {
+        "CMAKE_RUNTIME_OUTPUT_DIRECTORY": "${sourceDir}/build/release",
+        "CMAKE_LIBRARY_OUTPUT_DIRECTORY": "${sourceDir}/build/release"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "inherits": "debug",
+      "displayName": "Windows Debug (MSVC + Ninja)",
+      "description": "Run from a VS 2022 x64 developer shell, or through scripts/build. Places every executable and kimodo.dll in build/debug.",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"},
+      "cacheVariables": {
+        "CMAKE_RUNTIME_OUTPUT_DIRECTORY": "${sourceDir}/build/debug",
+        "CMAKE_LIBRARY_OUTPUT_DIRECTORY": "${sourceDir}/build/debug"
+      }
+    }
   ],
-  "buildPresets":[{"name":"debug","configurePreset":"debug"},{"name":"release","configurePreset":"release"},{"name":"asan-ubsan","configurePreset":"asan-ubsan"}],
-  "testPresets":[{"name":"debug","configurePreset":"debug","output":{"outputOnFailure":true}},{"name":"asan-ubsan","configurePreset":"asan-ubsan","output":{"outputOnFailure":true}}]
+  "buildPresets": [
+    {"name":"debug","configurePreset":"debug"},
+    {"name":"release","configurePreset":"release"},
+    {"name":"asan-ubsan","configurePreset":"asan-ubsan"},
+    {"name": "windows-release", "configurePreset": "windows-release"},
+    {"name": "windows-debug", "configurePreset": "windows-debug"},
+    {"name": "windows-library-release", "configurePreset": "windows-release", "targets": ["kimodo", "kimodo-capi-smoke"]},
+    {"name": "windows-library-debug", "configurePreset": "windows-debug", "targets": ["kimodo", "kimodo-capi-smoke"]}
+  ],
+  "testPresets": [
+    {"name":"debug","configurePreset":"debug","output":{"outputOnFailure":true}},
+    {"name":"asan-ubsan","configurePreset":"asan-ubsan","output":{"outputOnFailure":true}},
+    {"name": "windows-release", "configurePreset": "windows-release", "output": {"outputOnFailure": true}},
+    {"name": "windows-debug", "configurePreset": "windows-debug", "output": {"outputOnFailure": true}}
+  ]
 }

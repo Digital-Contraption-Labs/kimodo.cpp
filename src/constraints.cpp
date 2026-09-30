@@ -191,6 +191,88 @@ struct builder {
 };
 } // namespace
 
+namespace {
+// Upstream SOMASkeleton30.from_SOMASkeleton77: the 30 joints' indices in the
+// 77-joint skeleton (kimodo/skeleton/definitions.py bone orders).
+constexpr std::array<size_t, 30> soma77_to_30{0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 18,
+                                              28, 39, 40, 41, 42, 46, 56, 67, 68, 69, 70, 72, 73, 74, 75};
+} // namespace
+
+namespace {
+// Doubles from JSON convert exactly as the demo server's Go does.
+template <class T>
+std::expected<std::vector<float>, std::string> pose_rotations(
+    const skeleton_spec &skeleton, std::span<const T> values, std::size_t frames,
+    std::size_t pose_joints, int width, std::string_view name) {
+    const size_t J = skeleton.joints(), P = pose_joints ? pose_joints : J;
+    const bool soma = skeleton.key == "soma30", from77 = soma && P == 77 && J == soma77_to_30.size();
+    if (P != J && !from77)
+        return std::unexpected(std::string(name) + " poses must have " + std::to_string(J) + (soma ? " or 77" : "") +
+                               " joints, got " + std::to_string(P));
+    if (width != 3 && width != 4) return std::unexpected(std::string(name) + " rotations must be XYZW or axis-angle");
+    const auto w = static_cast<size_t>(width);
+    if (values.size() != frames * P * w)
+        return std::unexpected(std::string(name) + " must hold " + std::to_string(P) + " rotations of " +
+                               std::to_string(w) + " values per constrained frame");
+    std::vector<float> out(frames * J * 4);
+    for (size_t f = 0; f < frames; ++f)
+        for (size_t j = 0; j < J; ++j) {
+            const T *v = values.data() + (f * P + (from77 ? soma77_to_30[j] : j)) * w;
+            double q[4];
+            if (width == 3) {
+                // Axis-angle: the axis scaled by the angle in radians.
+                const double angle = std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+                const double s = angle < 1.e-12 ? 0. : std::sin(angle / 2) / angle;
+                q[0] = v[0] * s; q[1] = v[1] * s; q[2] = v[2] * s; q[3] = angle < 1.e-12 ? 1. : std::cos(angle / 2);
+            } else {
+                for (int k = 0; k < 4; ++k) q[k] = v[k];
+            }
+            const double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+            if (!std::isfinite(n) || n < 1.e-6) return std::unexpected(std::string(name) + " holds a zero or non-finite rotation");
+            for (size_t k = 0; k < 4; ++k) out[(f * J + j) * 4 + k] = static_cast<float>(q[k] / n);
+        }
+    return out;
+}
+} // namespace
+
+std::expected<std::vector<float>, std::string> pose_rotations_xyzw(
+    const skeleton_spec &skeleton, std::span<const float> values, std::size_t frames,
+    std::size_t pose_joints, int width, std::string_view name) {
+    return pose_rotations(skeleton, values, frames, pose_joints, width, name);
+}
+
+std::expected<std::vector<float>, std::string> pose_rotations_xyzw(
+    const skeleton_spec &skeleton, std::span<const double> values, std::size_t frames,
+    std::size_t pose_joints, int width, std::string_view name) {
+    return pose_rotations(skeleton, values, frames, pose_joints, width, name);
+}
+
+std::expected<std::vector<motion_constraint>, std::string> canonical_constraints(
+    const skeleton_spec &skeleton, std::span<const motion_constraint> constraints) {
+    std::vector<motion_constraint> out;
+    out.reserve(constraints.size());
+    for (size_t index = 0; index < constraints.size(); ++index) {
+        motion_constraint c = constraints[index];
+        const bool xyzw = !c.local_rotations_xyzw.empty(), axis = !c.local_rotations_axis_angle.empty();
+        const auto fail = [&](const std::string &message) {
+            return std::unexpected("constraint " + std::to_string(index) + ": " + message);
+        };
+        if (xyzw || axis) {
+            if (c.type == constraint_type::root2d) return fail("a root2d constraint takes only smooth_root_2d and root_heading");
+            if (xyzw && axis) return fail("a pose needs exactly one of local_rotations_xyzw or local_rotations_axis_angle");
+            auto rotations = axis
+                ? pose_rotations_xyzw(skeleton, c.local_rotations_axis_angle, c.frames.size(), c.pose_joints, 3, "local_rotations_axis_angle")
+                : pose_rotations_xyzw(skeleton, c.local_rotations_xyzw, c.frames.size(), c.pose_joints, 4, "local_rotations_xyzw");
+            if (!rotations) return fail(rotations.error());
+            c.local_rotations_xyzw = std::move(*rotations);
+            c.local_rotations_axis_angle.clear();
+        }
+        c.pose_joints = 0;
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
 bool constraint_condition::any(std::size_t first, std::size_t rows, std::size_t motion_dim) const noexcept {
     const size_t begin = std::min(first * motion_dim, mask.size()), end = std::min((first + rows) * motion_dim, mask.size());
     return std::any_of(mask.begin() + static_cast<std::ptrdiff_t>(begin), mask.begin() + static_cast<std::ptrdiff_t>(end),

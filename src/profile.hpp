@@ -1,12 +1,15 @@
 #pragma once
 
+#include "log.hpp"
+
 #include <chrono>
-#include <cstdlib>
 
 namespace kimodo::detail {
 
+// Timings go to the log at debug level (the tools print them to stderr when
+// KIMODO_PROFILE is set).
 inline bool profile_enabled() noexcept {
-    return std::getenv("KIMODO_PROFILE") != nullptr;
+    return log_enabled(log_level::debug);
 }
 
 inline double profile_elapsed_ms(std::chrono::steady_clock::time_point started) noexcept {

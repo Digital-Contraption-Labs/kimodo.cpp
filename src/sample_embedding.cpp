@@ -1,6 +1,7 @@
 // Replay motion generation with an explicit embedding and initial-noise tensor.
 // This is the controlled boundary used by quantization comparisons.
 #include "denoiser.hpp"
+#include "environment_options.hpp"
 #include "ggml_weights.hpp"
 #include "motion_decode.hpp"
 #include "skeleton.hpp"
@@ -80,7 +81,7 @@ int main(int argc, char **argv) try {
         throw std::runtime_error("frames and steps must be positive");
     const auto embedding = read_f32(argv[2]);
     const auto noise = read_f32(argv[3]);
-    auto weights = kimodo::detail::ggml_motion_weights::load(argv[1]);
+    auto weights = kimodo::detail::ggml_motion_weights::load(argv[1], kimodo::tools::environment_options());
     if (!weights)
         throw std::runtime_error(weights.error());
     const auto *skeleton =

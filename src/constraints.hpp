@@ -8,6 +8,7 @@
 #include <expected>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace kimodo::detail {
@@ -22,6 +23,31 @@ struct constraint_condition {
     // Whether any feature of rows [first, first + rows) is constrained.
     [[nodiscard]] bool any(std::size_t first, std::size_t rows, std::size_t motion_dim) const noexcept;
 };
+
+// A pose's local rotations, `frames` poses of `pose_joints` joints (0: the
+// skeleton's) given as `width` 4 XYZW or 3 axis-angle values, as normalized
+// XYZW quaternions in the skeleton's joint order [frames, J, 4].  The SOMA
+// skeleton also takes NVIDIA's 77-joint SOMA order, whose joints it keeps
+// (upstream SOMASkeleton30.from_SOMASkeleton77).  `name` heads the errors.
+std::expected<std::vector<float>, std::string> pose_rotations_xyzw(
+    const skeleton_spec &skeleton, std::span<const float> values, std::size_t frames,
+    std::size_t pose_joints, int width, std::string_view name);
+std::expected<std::vector<float>, std::string> pose_rotations_xyzw(
+    const skeleton_spec &skeleton, std::span<const double> values, std::size_t frames,
+    std::size_t pose_joints, int width, std::string_view name);
+
+// Constraints as build_constraint_condition takes them: every pose as XYZW
+// quaternions in the skeleton's joint order.
+std::expected<std::vector<motion_constraint>, std::string> canonical_constraints(
+    const skeleton_spec &skeleton, std::span<const motion_constraint> constraints);
+
+// NVIDIA Kimodo's constraints JSON -- a list of constraint sets as its demo
+// saves them -- as canonical constraints for a clip of `total_frames`, checked
+// the way the demo server's parseConstraints checks them (demo/constraints.go)
+// and with its messages.
+std::expected<std::vector<motion_constraint>, std::string> constraints_from_json(
+    std::string_view json, const skeleton_spec &skeleton, std::size_t total_frames,
+    std::size_t max_constraints);
 
 // Validates `constraints` against the skeleton and a clip of `frames` frames
 // and builds their condition.  When constraints overlap on a feature, the

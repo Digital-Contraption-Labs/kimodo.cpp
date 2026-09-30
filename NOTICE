@@ -10,5 +10,9 @@ https://github.com/nv-tlabs/kimodo
 Post-processing uses Eigen (MPL-2.0, built with EIGEN_MPL2_ONLY):
 https://gitlab.com/libeigen/eigen
 
+third_party/nlohmann is JSON for Modern C++, Copyright (c) 2013-2023 Niels
+Lohmann, MIT, which reads NVIDIA Kimodo's constraints JSON:
+https://github.com/nlohmann/json
+
 The demo displays the LocalAI logo from the LocalAI project:
 https://github.com/mudler/LocalAI

@@ -1,5 +1,6 @@
 #include "gguf.hpp"
 #include "skeleton.hpp"
+#include "utf8_path.hpp"
 
 #include <algorithm>
 #include <array>
@@ -33,7 +34,7 @@ bool skip(std::istream &in, std::uint32_t type) {
 }
 
 std::expected<gguf_file, std::string> read_gguf_header(std::string_view path) {
-    std::ifstream in(std::string(path), std::ios::binary);
+    std::ifstream in(utf8_path(path), std::ios::binary);
     if (!in) return std::unexpected("cannot open GGUF file");
     std::uint32_t magic = 0, version = 0;
     std::uint64_t tensor_count = 0, metadata_count = 0;

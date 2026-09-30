@@ -1,6 +1,7 @@
 // Command-line bridge for the localhost demo.  It deliberately uses only the
 // public C++ model API, so the demo exercises the same text route as embedders.
 #include <kimodo/kimodo.hpp>
+#include "environment_options.hpp"
 
 #include <bit>
 #include <cmath>
@@ -171,14 +172,23 @@ float text_cfg_from_env() {
     const char *value = std::getenv("KIMODO_TEXT_CFG");
     return value ? parse_text_cfg(value) : default_text_cfg;
 }
+
+// The environment's options, with room for the longest clip the library
+// takes: the demo server enforces its own 12 s policy per segment.
+kimodo::runtime_options tool_options() {
+    auto options = kimodo::tools::environment_options();
+    options.max_segment_frames = kimodo::limit_ceilings.max_segment_frames;
+    return options;
+}
 }
 
 int main(int argc, char **argv) try {
+    kimodo::tools::log_to_stderr();
     if (argc == 4 && std::string_view(argv[1]) == "--server") {
 #ifdef _WIN32
         _setmode(_fileno(stdout), _O_BINARY); // the motion goes down stdout as bytes
 #endif
-        auto model = kimodo::model::load(argv[2], argv[3]);
+        auto model = kimodo::model::load(argv[2], argv[3], tool_options());
         if (!model) throw std::runtime_error(model.error());
         std::string line;
         while (std::getline(std::cin, line)) {
@@ -227,7 +237,7 @@ int main(int argc, char **argv) try {
             if (!prompt_file && prompt.empty()) throw std::runtime_error("cannot read sequence prompt");
             segments.push_back({prompt, static_cast<unsigned>(std::stoul(argv[index]))});
         }
-        auto model = kimodo::model::load(argv[1], argv[2]);
+        auto model = kimodo::model::load(argv[1], argv[2], tool_options());
         if (!model) throw std::runtime_error(model.error());
         auto motion = (*model)->generate_text_sequence(segments, transition, steps, seed, text_cfg_from_env(), constraint_cfg);
         if (!motion) throw std::runtime_error(motion.error());
@@ -247,7 +257,7 @@ int main(int argc, char **argv) try {
     const auto frames = static_cast<unsigned>(std::stoul(argv[4]));
     const auto steps = static_cast<unsigned>(std::stoul(argv[5]));
     const auto seed = static_cast<std::uint64_t>(std::stoull(argv[6]));
-    auto model = kimodo::model::load(argv[1], argv[2]);
+    auto model = kimodo::model::load(argv[1], argv[2], tool_options());
     if (!model) throw std::runtime_error(model.error());
     auto motion = (*model)->generate_text(prompt, frames, steps, seed, text_cfg_from_env(), constraint_cfg);
     if (!motion) throw std::runtime_error(motion.error());

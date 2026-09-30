@@ -1,4 +1,5 @@
 #include "llm_text_encoder.hpp"
+#include "environment_options.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -24,7 +25,7 @@ int main(int argc, char **argv) {
     // captured prompt is kept here to make the complete native route explicit.
     constexpr std::string_view prompt =
         "A person runs forward and then leaps over an obstacle in front of them.";
-    auto encoder = kimodo::detail::llm_text_encoder::load(argv[1]);
+    auto encoder = kimodo::detail::llm_text_encoder::load(argv[1], kimodo::tools::environment_options());
     if (!encoder) {
         std::cerr << "load failed: " << encoder.error() << '\n';
         return 1;

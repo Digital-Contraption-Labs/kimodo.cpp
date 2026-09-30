@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <expected>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -13,6 +14,10 @@ struct skeleton_spec;
 
 // One sequence segment with an already-encoded text condition and caller-
 // supplied initial noise. Continuation noise includes its transition prefix.
+// Called after every diffusion step.  Returning false stops the sampler,
+// which then fails with kimodo::cancelled_error.
+using sampling_observer = std::function<bool()>;
+
 struct sampled_sequence_segment {
     std::span<const float> embedding;
     std::span<const float> initial_noise;
@@ -63,7 +68,7 @@ std::expected<std::vector<float>, std::string> run_separated_cfg_denoiser(
 std::expected<std::vector<float>, std::string> sample_motion_from_noise(
     const ggml_motion_weights &weights, std::span<const float> initial_noise,
     std::span<const float> embedding, std::size_t frames, unsigned steps,
-    float text_weight, float constraint_weight);
+    float text_weight, float constraint_weight, const sampling_observer *observer = nullptr);
 
 // Multi-prompt transition sampler. `observed` and `observed_mask` are [T,motion_dim]
 // normalized motion-representation values/masks. This mirrors the upstream
@@ -72,7 +77,8 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
     const ggml_motion_weights &weights, std::span<const float> initial_noise,
     std::span<const float> embedding, std::span<const float> observed,
     std::span<const float> observed_mask, float first_heading, std::size_t frames,
-    unsigned steps, float text_weight, float constraint_weight);
+    unsigned steps, float text_weight, float constraint_weight,
+    const sampling_observer *observer = nullptr);
 
 // End-to-end upstream `_multiprompt` orchestration.  DDIM operates in
 // normalized motion space; the returned joined representation is raw so its
@@ -86,7 +92,7 @@ std::expected<std::vector<float>, std::string> sample_motion_sequence_from_noise
     const ggml_motion_weights &weights, std::span<const sampled_sequence_segment> segments,
     unsigned transition_frames, unsigned steps, float text_weight, float constraint_weight,
     const constraint_condition *user = nullptr, float first_heading = 0.F,
-    const sequence_postprocess *post = nullptr);
+    const sequence_postprocess *post = nullptr, const sampling_observer *observer = nullptr);
 
 // Build the exact condition consumed by the next `_multiprompt` DDIM run.
 // Exposed for the raw fixture test as well as the runtime orchestrator.

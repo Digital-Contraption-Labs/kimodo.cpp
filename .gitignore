@@ -42,3 +42,9 @@ __pycache__/
 .pytest_cache/
 /output_motion/
 /.kimodo-manifests/
+
+# A developer's own CMake presets; the project's are in CMakePresets.json
+/CMakeUserPresets.json
+
+# Packages built by scripts/build (docs/SHARED_LIBRARY_PLAN.md)
+/dist/

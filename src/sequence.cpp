@@ -70,7 +70,8 @@ std::expected<sequence_transition, std::string> prepare_sequence_transition(
 std::expected<std::vector<float>, std::string> sample_motion_sequence_from_noise(
     const ggml_motion_weights &weights, std::span<const sampled_sequence_segment> segments,
     unsigned transition_frames, unsigned steps, float text_weight, float constraint_weight,
-    const constraint_condition *user, float first_heading, const sequence_postprocess *post) {
+    const constraint_condition *user, float first_heading, const sequence_postprocess *post,
+    const sampling_observer *observer) {
     const size_t D=weights.motion_dim(),body=D-5;
     if(segments.empty()||!transition_frames||!D)return std::unexpected("sequence requires segments and a transition");
 #ifndef KIMODO_HAVE_POSTPROCESS
@@ -117,8 +118,8 @@ std::expected<std::vector<float>, std::string> sample_motion_sequence_from_noise
                 std::vector<float> observed(sampled_frames*D),mask(sampled_frames*D);
                 if(user){std::copy_n(user->observed.begin(),observed.size(),observed.begin());std::copy_n(user->mask.begin(),mask.size(),mask.begin());}
                 normalize(observed);
-                sampled=sample_motion_from_noise_conditioned(weights,segment.initial_noise,segment.embedding,observed,mask,first_heading,sampled_frames,steps,text_weight,constraint_weight);
-            }else sampled=sample_motion_from_noise(weights,segment.initial_noise,segment.embedding,sampled_frames,steps,text_weight,constraint_weight);
+                sampled=sample_motion_from_noise_conditioned(weights,segment.initial_noise,segment.embedding,observed,mask,first_heading,sampled_frames,steps,text_weight,constraint_weight,observer);
+            }else sampled=sample_motion_from_noise(weights,segment.initial_noise,segment.embedding,sampled_frames,steps,text_weight,constraint_weight,observer);
             if(!sampled)return std::unexpected(sampled.error());current=std::move(*sampled);unnormalize(current);
 #ifdef KIMODO_HAVE_POSTPROCESS
             if(post)if(auto done=post_process(current,sampled_frames,post->targets->slice(0,sampled_frames,skeleton->joints()));!done)return std::unexpected(done.error());
@@ -138,7 +139,7 @@ std::expected<std::vector<float>, std::string> sample_motion_sequence_from_noise
                 transition->observed[static_cast<size_t>(dst)]-=origin_x;transition->observed[static_cast<size_t>(dst)+2]-=origin_z;
             }
             normalize(transition->observed);
-            auto sampled=sample_motion_from_noise_conditioned(weights,segment.initial_noise,segment.embedding,transition->observed,transition->observed_mask,transition->first_heading,sampled_frames,steps,text_weight,constraint_weight);if(!sampled)return std::unexpected(sampled.error());
+            auto sampled=sample_motion_from_noise_conditioned(weights,segment.initial_noise,segment.embedding,transition->observed,transition->observed_mask,transition->first_heading,sampled_frames,steps,text_weight,constraint_weight,observer);if(!sampled)return std::unexpected(sampled.error());
             current=std::move(*sampled);unnormalize(current);for(size_t frame=0;frame<sampled_frames;++frame){auto*row=current.data()+frame*D;row[0]+=origin_x;row[2]+=origin_z;}
 #ifdef KIMODO_HAVE_POSTPROCESS
             if(post){

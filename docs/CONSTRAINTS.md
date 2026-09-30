@@ -145,6 +145,19 @@ the rotations. The C++ `model::generate_text`, `generate_embedding` and
 `generate_text_sequence` take a `generation_options`, whose post-processing is
 off by default as in upstream's Python API.
 
+ABI 3's `kimodo_generate_sequence` takes constraints both ways, joined: the
+structs, and NVIDIA's constraints JSON in `kimodo_request.constraints_json`,
+read by a C++ port of the server's `demo/constraints.go` with its checks and
+messages. A struct pose may also be axis-angle
+(`local_rotations_axis_angle`) and, on the SOMA models, in NVIDIA's 77-joint
+order (`pose_joints = 77`). `kimodo_generation_options_init` gives the
+server's defaults, post-processing on except for G1. The same example file
+posted to the server and passed to the library gives byte-identical motion,
+and a pose pinned as a structs keyframe and as JSON gives the same clip;
+`tests/capi_smoke.c --keyframe` checks both. The skeleton (joint names,
+parents, rest offsets) comes from `kimodo_model_joint_name` and its
+neighbours, so a host can map its rig onto the model's joints.
+
 ## What to expect
 
 These measurements used NVIDIA's own SOMA RP example constraint files, posted

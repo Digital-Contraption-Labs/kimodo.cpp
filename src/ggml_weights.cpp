@@ -1,15 +1,13 @@
 #include "ggml_weights.hpp"
+#include "backend.hpp"
 #include "gguf.hpp"
 #include "motion_graph_cache.hpp"
 #include "profile.hpp"
+#include "utf8_path.hpp"
 
 #include <algorithm>
-#include <cerrno>
-#include <cstdlib>
 #include <cstdio>
 #include <fstream>
-#include <limits>
-#include <thread>
 #include <vector>
 
 #include <ggml.h>
@@ -22,86 +20,31 @@
 #endif
 
 namespace kimodo::detail {
-namespace {
 
-void configure_vulkan_f32_parity() noexcept {
-    // Kimodo's reference model is F32.  Current Vulkan cooperative-matrix
-    // paths convert F32 inputs to FP16 on this GPU, which breaks parity.
-    // Keep callers free to supply their own stricter environment, but make
-    // the correct reference-first path the default.
-#if defined(__unix__)
-    setenv("GGML_VK_DISABLE_COOPMAT", "1", 0);
-    setenv("GGML_VK_DISABLE_COOPMAT2", "1", 0);
-    setenv("GGML_VK_DISABLE_F16", "1", 0);
-#elif defined(_WIN32)
-    // _putenv_s always overwrites, so preserve any caller-supplied value.
-    for (const char *name : {"GGML_VK_DISABLE_COOPMAT", "GGML_VK_DISABLE_COOPMAT2", "GGML_VK_DISABLE_F16"}) {
-        if (std::getenv(name) == nullptr) _putenv_s(name, "1");
-    }
-#endif
-}
-
-// GGML's CPU backend defaults to four threads.  That is a sensible library
-// default, but makes a full diffusion sample use only a small fraction of a
-// typical workstation.  Honour an explicit cap for predictable deployment
-// and otherwise use the machine's advertised concurrency.
-int cpu_thread_count() noexcept {
-    constexpr unsigned fallback = 4;
-    unsigned threads = std::thread::hardware_concurrency();
-    if (threads == 0) threads = fallback;
-
-    if (const char *value = std::getenv("KIMODO_THREADS")) {
-        char *end = nullptr;
-        errno = 0;
-        const long requested = std::strtol(value, &end, 10);
-        if (errno == 0 && end != value && *end == '\0' && requested > 0 &&
-            requested <= std::numeric_limits<int>::max()) {
-            threads = static_cast<unsigned>(requested);
-        }
-    }
-    return static_cast<int>(std::min<unsigned>(threads, std::numeric_limits<int>::max()));
-}
-
-} // namespace
-
-std::expected<std::unique_ptr<ggml_motion_weights>, std::string> ggml_motion_weights::load(std::string_view path) {
+std::expected<std::unique_ptr<ggml_motion_weights>, std::string> ggml_motion_weights::load(
+    std::string_view path, const runtime_options &options) {
     const auto load_started = std::chrono::steady_clock::now();
     auto checked = read_gguf_header(path);
     if (!checked) return std::unexpected(checked.error());
     if (auto valid = validate_motion_gguf(*checked); !valid) return std::unexpected(valid.error());
     auto result = std::unique_ptr<ggml_motion_weights>(new ggml_motion_weights);
+    result->options_ = options;
     result->skeleton_ = checked->strings.at("kimodo.skeleton");
     result->motion_dim_ = static_cast<size_t>(checked->uints.at("kimodo.motion_dim"));
     result->body_dim_ = static_cast<size_t>(checked->uints.at("kimodo.body_dim"));
     gguf_init_params params{true, &result->context_};
+    // ggml opens paths as UTF-8.
     result->gguf_ = gguf_init_from_file(std::string(path).c_str(), params);
     if (!result->gguf_ || !result->context_) return std::unexpected("GGML could not load checked motion GGUF");
-    // Vulkan is the normal inference path.  Keep the CPU backend as a
-    // portability fallback, including for CI systems without a Vulkan ICD.
-#if defined(KIMODO_HAVE_GGML_VULKAN)
-    // Retain a deterministic CPU escape hatch for parity triage.  It is not
-    // a performance mode; a captured fixture can establish whether a drift
-    // belongs to the GGML graph or specifically to Vulkan.
-    const bool force_cpu = [] {
-        const char *value = std::getenv("KIMODO_BACKEND");
-        return value && std::string_view(value) == "cpu";
-    }();
-    if (!force_cpu) {
-        configure_vulkan_f32_parity();
-        if (ggml_backend_vk_get_device_count() > 0) result->backend_ = ggml_backend_vk_init(0);
-    }
-#endif
-    if (!result->backend_) {
-        result->backend_ = ggml_backend_cpu_init();
-        if (!result->backend_) return std::unexpected("GGML CPU backend initialization failed");
-        ggml_backend_cpu_set_n_threads(result->backend_, cpu_thread_count());
-    }
+    auto backend = start_backend(options, true);
+    if (!backend) return std::unexpected(backend.error());
+    result->backend_ = *backend;
     result->buffer_ = ggml_backend_alloc_ctx_tensors(result->context_, result->backend_);
     if (!result->buffer_) return std::unexpected("GGML motion weight allocation failed");
     result->allocator_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(result->backend_));
     if (!result->allocator_) return std::unexpected("GGML motion compute allocator creation failed");
     const double allocation_ms = profile_elapsed_ms(load_started);
-    std::ifstream input(std::string(path), std::ios::binary);
+    std::ifstream input(utf8_path(path), std::ios::binary);
     if (!input) return std::unexpected("cannot reopen motion GGUF");
     const size_t data_start = gguf_get_data_offset(result->gguf_);
     std::vector<char> scratch(8U*1024U*1024U);
@@ -118,9 +61,9 @@ std::expected<std::unique_ptr<ggml_motion_weights>, std::string> ggml_motion_wei
         }
     }
     if (profile_enabled()) {
-        std::fprintf(stderr, "profile motion.weights allocation_ms=%.3f upload_ms=%.3f total_ms=%.3f\n",
-                     allocation_ms, profile_elapsed_ms(load_started) - allocation_ms,
-                     profile_elapsed_ms(load_started));
+        logf(log_level::debug, "profile motion.weights allocation_ms=%.3f upload_ms=%.3f total_ms=%.3f",
+             allocation_ms, profile_elapsed_ms(load_started) - allocation_ms,
+             profile_elapsed_ms(load_started));
     }
     return result;
 }

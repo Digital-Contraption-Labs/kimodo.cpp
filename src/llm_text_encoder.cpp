@@ -2,8 +2,10 @@
 // src/llama-graph.cpp at 78ec4c378031811671d1c76a067acbee4f4c56ce as a
 // reference. No llama.cpp source is copied.
 #include "llm_text_encoder.hpp"
+#include "backend.hpp"
 #include "llm_tokenizer.hpp"
 #include "profile.hpp"
+#include "utf8_path.hpp"
 
 #include <ggml.h>
 #include <ggml-alloc.h>
@@ -37,49 +39,15 @@ namespace kimodo::detail {
 namespace {
 constexpr int64_t hidden = 4096, heads = 32, kv_heads = 8, head_dim = 128;
 
-bool use_vulkan() {
-    const char *choice = std::getenv("KIMODO_BACKEND");
-    return !choice || std::string_view(choice) != "cpu";
-}
+// What the device must keep free beside a resident encoder: the motion model
+// (1.13 GB), its compute buffers, and room for the host application's own
+// rendering, which shares the GPU.
+constexpr uintmax_t resident_reserve_bytes = 3ULL * 1024 * 1024 * 1024;
 
-int layer_chunk_size() {
-    constexpr int fallback = 8;
-    const char *value = std::getenv("KIMODO_TEXT_LAYER_CHUNK");
-    if (!value) return fallback;
-    int parsed = 0;
-    const auto [end, error] = std::from_chars(value, value + std::strlen(value), parsed);
-    if (error != std::errc{} || *end != '\0' || parsed < 1 || parsed > 32)
-        throw std::runtime_error("KIMODO_TEXT_LAYER_CHUNK must be in 1..32");
-    return parsed;
-}
-
-uintmax_t resident_limit_bytes() {
-    const char *value = std::getenv("KIMODO_TEXT_RESIDENT_LIMIT_MIB");
-    if (!value) return std::numeric_limits<uintmax_t>::max();
-    uintmax_t parsed = 0;
-    const auto [end, error] = std::from_chars(value, value + std::strlen(value), parsed);
-    if (error != std::errc{} || *end != '\0' || parsed == 0 ||
-        parsed > std::numeric_limits<uintmax_t>::max() / (1024U * 1024U))
-        throw std::runtime_error("KIMODO_TEXT_RESIDENT_LIMIT_MIB must be a positive integer");
-    return parsed * 1024U * 1024U;
-}
-
-bool packed_lora_enabled() noexcept {
-    const char *value = std::getenv("KIMODO_TEXT_PACKED_LORA");
-    return !value || std::string_view(value) != "0";
-}
-
-int cpu_thread_count() noexcept {
-    unsigned threads = std::max(1U, std::thread::hardware_concurrency());
-    if (const char *value = std::getenv("KIMODO_THREADS")) {
-        char *end = nullptr;
-        errno = 0;
-        const long requested = std::strtol(value, &end, 10);
-        if (errno == 0 && end != value && *end == '\0' && requested > 0 &&
-            requested <= std::numeric_limits<int>::max())
-            threads = static_cast<unsigned>(requested);
-    }
-    return static_cast<int>(std::min<unsigned>(threads, std::numeric_limits<int>::max()));
+std::string mib(uintmax_t bytes) {
+    char text[32];
+    std::snprintf(text, sizeof text, "%.0f MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    return text;
 }
 
 struct component {
@@ -104,14 +72,14 @@ std::unique_ptr<component> open_component(const std::filesystem::path &path, ggm
     const auto started = std::chrono::steady_clock::now();
     auto result = std::make_unique<component>();
     gguf_init_params params{true, &result->ctx};
-    result->file = gguf_init_from_file(path.string().c_str(), params);
+    result->file = gguf_init_from_file(utf8_string(path).c_str(), params);
     if (!result->file || !result->ctx)
-        throw std::runtime_error("cannot load text component " + path.string());
+        throw std::runtime_error("cannot load text component " + utf8_string(path));
     result->weights = ggml_backend_alloc_ctx_tensors(result->ctx, backend);
-    if (!result->weights) throw std::runtime_error("cannot allocate text component " + path.string());
+    if (!result->weights) throw std::runtime_error("cannot allocate text component " + utf8_string(path));
 
     std::ifstream in(path, std::ios::binary);
-    if (!in) throw std::runtime_error("cannot reopen text component " + path.string());
+    if (!in) throw std::runtime_error("cannot reopen text component " + utf8_string(path));
     const auto data_offset = gguf_get_data_offset(result->file);
     size_t total_bytes = 0;
     std::vector<char> scratch(8U * 1024U * 1024U);
@@ -132,9 +100,9 @@ std::unique_ptr<component> open_component(const std::filesystem::path &path, ggm
         }
     }
     if (profile_enabled()) {
-        std::fprintf(stderr, "profile text.upload component=%s mib=%.2f ms=%.3f\n",
-                     path.filename().string().c_str(),
-                     static_cast<double>(total_bytes) / (1024.0 * 1024.0), profile_elapsed_ms(started));
+        logf(log_level::debug, "profile text.upload component=%s mib=%.2f ms=%.3f",
+             utf8_string(path.filename()).c_str(),
+             static_cast<double>(total_bytes) / (1024.0 * 1024.0), profile_elapsed_ms(started));
     }
     return result;
 }
@@ -155,9 +123,9 @@ std::unique_ptr<monolithic_bundle> open_monolithic(const std::filesystem::path &
     auto result = std::make_unique<monolithic_bundle>();
     result->path = path;
     gguf_init_params params{true, &result->catalog};
-    result->file = gguf_init_from_file(path.string().c_str(), params);
+    result->file = gguf_init_from_file(utf8_string(path).c_str(), params);
     if (!result->file || !result->catalog)
-        throw std::runtime_error("cannot load monolithic text model " + path.string());
+        throw std::runtime_error("cannot load monolithic text model " + utf8_string(path));
     for (std::int64_t index = 0; index < gguf_get_n_tensors(result->file); ++index) {
         const char *name = gguf_get_tensor_name(result->file, index);
         auto *tensor = ggml_get_tensor(result->catalog, name);
@@ -239,7 +207,7 @@ std::unique_ptr<component> open_component(monolithic_bundle &bundle,
         }
     }
     if (profile_enabled())
-        std::fprintf(stderr, "profile text.upload component=%s%s mib=%.2f ms=%.3f\n",
+        logf(log_level::debug, "profile text.upload component=%s%s mib=%.2f ms=%.3f",
                      kind == component_kind::layer ? "layer-" :
                          kind == component_kind::embedding ? "embedding" : "final-norm",
                      kind == component_kind::layer ? std::to_string(layer).c_str() : "",
@@ -286,7 +254,7 @@ ggml_tensor *repeat_kv(ggml_context *ctx, ggml_tensor *x, int64_t seq) {
 }
 
 ggml_tensor *layer_graph(ggml_context *ctx, ggml_tensor *x, ggml_tensor *positions,
-                         const component &model, int64_t seq) {
+                         const component &model, int64_t seq, bool packed_lora) {
     auto base = [&](const char *name, ggml_tensor *value) {
         const std::string prefix(name);
         auto *weight = model.tensor((prefix + "_base.weight").c_str());
@@ -338,7 +306,7 @@ ggml_tensor *layer_graph(ggml_context *ctx, ggml_tensor *x, ggml_tensor *positio
     // once avoids two redundant RMS norms plus their casts and scale ops.
     auto *attn_input = norm(ctx, residual, attn_norm);
     ggml_tensor *q, *k, *v;
-    if (packed_lora_enabled()) {
+    if (packed_lora) {
         auto *low_rank = packed_low_rank("attn_q_proj", "attn_k_proj", "attn_v_proj", attn_input);
         q = project_lora("attn_q_proj", attn_input, low_rank_view(low_rank, 0));
         k = project_lora("attn_k_proj", attn_input, low_rank_view(low_rank, 1));
@@ -365,7 +333,7 @@ ggml_tensor *layer_graph(ggml_context *ctx, ggml_tensor *x, ggml_tensor *positio
         linear("attn_o_proj", ggml_reshape_2d(ctx, attention, hidden, seq)));
     auto *hidden_norm = norm(ctx, output, ffn_norm);
     ggml_tensor *gate, *up;
-    if (packed_lora_enabled()) {
+    if (packed_lora) {
         auto *low_rank = packed_low_rank("ffn_gate_proj", "ffn_up_proj", nullptr, hidden_norm);
         gate = ggml_silu(ctx, project_lora("ffn_gate_proj", hidden_norm, low_rank_view(low_rank, 0)));
         up = project_lora("ffn_up_proj", hidden_norm, low_rank_view(low_rank, 1));
@@ -378,7 +346,7 @@ ggml_tensor *layer_graph(ggml_context *ctx, ggml_tensor *x, ggml_tensor *positio
 }
 
 std::vector<float> run_layer_chunk(std::span<const std::unique_ptr<component>> layers,
-                                   const std::vector<float> &input, ggml_backend_t backend) {
+                                   const std::vector<float> &input, ggml_backend_t backend, bool packed_lora) {
     const int64_t seq = static_cast<int64_t>(input.size() / hidden);
     auto *ctx = ggml_init({128ULL * 1024ULL * 1024ULL, nullptr, true});
     if (!ctx) throw std::runtime_error("layer chunk graph allocation failed");
@@ -388,7 +356,7 @@ std::vector<float> run_layer_chunk(std::span<const std::unique_ptr<component>> l
     auto *positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq);
     ggml_set_input(state);
     ggml_set_input(positions);
-    for (const auto &layer : layers) state = layer_graph(ctx, state, positions, *layer, seq);
+    for (const auto &layer : layers) state = layer_graph(ctx, state, positions, *layer, seq, packed_lora);
     auto *graph = ggml_new_graph(ctx);
     ggml_build_forward_expand(graph, state);
     auto *buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
@@ -410,6 +378,7 @@ struct llm_text_encoder::impl {
     std::unique_ptr<llm_tokenizer> tokenizer;
     ggml_backend_t backend = nullptr;
     int layer_chunk = 8;
+    bool packed_lora = true;
     std::unique_ptr<component> embedding;
     std::vector<std::unique_ptr<component>> layers;
     std::unique_ptr<component> final_norm;
@@ -441,8 +410,10 @@ struct llm_text_encoder::impl {
 
 llm_text_encoder::~llm_text_encoder() = default;
 
-std::expected<std::unique_ptr<llm_text_encoder>, std::string> llm_text_encoder::load(std::string_view source) try {
-    const auto path = std::filesystem::path(source);
+std::expected<std::unique_ptr<llm_text_encoder>, std::string> llm_text_encoder::load(
+    std::string_view source, const runtime_options &options) try {
+    if (options.text_layer_chunk > 32) return std::unexpected("text_layer_chunk must be 0..32");
+    const auto path = utf8_path(source);
     const bool component_bundle = std::filesystem::is_directory(path);
     const bool monolithic = std::filesystem::is_regular_file(path) && path.extension() == ".gguf";
     if (!component_bundle && !monolithic)
@@ -465,19 +436,15 @@ std::expected<std::unique_ptr<llm_text_encoder>, std::string> llm_text_encoder::
     }
     auto result = std::unique_ptr<llm_text_encoder>(new llm_text_encoder);
     result->impl_ = std::make_unique<impl>();
-#if defined(KIMODO_HAVE_GGML_VULKAN)
-    if (use_vulkan() && ggml_backend_vk_get_device_count()) result->impl_->backend = ggml_backend_vk_init(0);
-#endif
-    if (!result->impl_->backend) {
-        result->impl_->backend = ggml_backend_cpu_init();
-        if (!result->impl_->backend) return std::unexpected("cannot initialize text backend");
-        ggml_backend_cpu_set_n_threads(result->impl_->backend, cpu_thread_count());
-    }
-    auto tokenizer = llm_tokenizer::load(tokenizer_path.string());
+    // The quantized encoder keeps ggml's cooperative-matrix kernels.
+    auto backend = start_backend(options, false);
+    if (!backend) return std::unexpected(backend.error());
+    result->impl_->backend = *backend;
+    auto tokenizer = llm_tokenizer::load(utf8_string(tokenizer_path));
     if (!tokenizer) return std::unexpected(tokenizer.error());
     result->impl_->directory = directory;
     result->impl_->tokenizer = std::move(*tokenizer);
-    result->impl_->layer_chunk = layer_chunk_size();
+    result->impl_->packed_lora = options.text_packed_lora;
     uintmax_t bundle_bytes = 0;
     if (component_bundle) {
         for (const auto &entry : std::filesystem::directory_iterator(path))
@@ -487,19 +454,37 @@ std::expected<std::unique_ptr<llm_text_encoder>, std::string> llm_text_encoder::
         result->impl_->monolithic = open_monolithic(path);
         bundle_bytes = std::filesystem::file_size(path) + std::filesystem::file_size(tokenizer_path);
     }
-    if (result->impl_->layer_chunk == 32 && bundle_bytes <= resident_limit_bytes()) {
+    // Resident, all 32 layers stay on the device; otherwise each encode
+    // streams them through it a group at a time.  Left to the library, the
+    // encoder is resident when the device has room for it beside the motion
+    // model and the host's own use of the GPU.
+    auto *device = ggml_backend_get_device(result->impl_->backend);
+    const char *device_name = device ? ggml_backend_dev_description(device) : "the CPU";
+    if (options.text_layer_chunk) {
+        result->impl_->layer_chunk = static_cast<int>(options.text_layer_chunk);
+    } else {
+        size_t free = 0, total = 0;
+        if (device) ggml_backend_dev_memory(device, &free, &total);
+        const bool room = free >= bundle_bytes + resident_reserve_bytes;
+        result->impl_->layer_chunk = room ? 32 : 8;
+        if (!room)
+            logf(log_level::info, "text encoder: %s has %s free; keeping all of it resident needs %s, so its layers stream in 8 at a time",
+                 device_name, mib(free).c_str(), mib(bundle_bytes + resident_reserve_bytes).c_str());
+    }
+    const uintmax_t limit = options.text_resident_limit_bytes ? options.text_resident_limit_bytes
+                                                              : std::numeric_limits<uintmax_t>::max();
+    if (result->impl_->layer_chunk == 32 && bundle_bytes <= limit) {
         const auto started = std::chrono::steady_clock::now();
         result->impl_->embedding = result->impl_->load_embedding();
         result->impl_->layers.reserve(32);
         for (int i = 0; i < 32; ++i)
             result->impl_->layers.push_back(result->impl_->load_layer(i));
         result->impl_->final_norm = result->impl_->load_final_norm();
-        if (profile_enabled())
-            std::fprintf(stderr, "profile text.resident_load layers=32 ms=%.3f\n", profile_elapsed_ms(started));
-    } else if (profile_enabled() && result->impl_->layer_chunk == 32) {
-        std::fprintf(stderr, "profile text.resident_skipped bundle_mib=%.2f limit_mib=%.2f\n",
-                     static_cast<double>(bundle_bytes) / (1024.0 * 1024.0),
-                     static_cast<double>(resident_limit_bytes()) / (1024.0 * 1024.0));
+        logf(log_level::info, "text encoder: all 32 layers resident on %s (%s) in %.1f s",
+             device_name, mib(bundle_bytes).c_str(), profile_elapsed_ms(started) / 1000.0);
+    } else if (result->impl_->layer_chunk == 32) {
+        logf(log_level::info, "text encoder: %s exceeds the resident limit of %s, so its layers stream in 8 at a time",
+             mib(bundle_bytes).c_str(), mib(limit).c_str());
     }
     return result;
 } catch (const std::exception &error) { return std::unexpected(error.what()); }
@@ -550,13 +535,13 @@ std::expected<std::array<float, 4096>, std::string> llm_text_encoder::encode(std
             if (!impl_->layers.empty()) {
                 const auto count = static_cast<size_t>(std::min(graph_chunk, 32 - first));
                 state = run_layer_chunk(std::span(impl_->layers).subspan(static_cast<size_t>(first), count),
-                                        state, impl_->backend);
+                                        state, impl_->backend, impl_->packed_lora);
                 continue;
             }
             std::vector<std::unique_ptr<component>> layers;
             for (int i = first; i < std::min(first + graph_chunk, 32); ++i)
                 layers.push_back(impl_->load_layer(i));
-            state = run_layer_chunk(layers, state, impl_->backend);
+            state = run_layer_chunk(layers, state, impl_->backend, impl_->packed_lora);
         }
         layers_ms = profile_elapsed_ms(started);
     }
@@ -588,10 +573,10 @@ std::expected<std::array<float, 4096>, std::string> llm_text_encoder::encode(std
     for (float &value : pooled) value /= float(ids->size() - 1);
     final_ms = profile_elapsed_ms(final_started);
     if (profile_enabled()) {
-        std::fprintf(stderr,
-                     "profile text.encode tokens=%zu embedding_ms=%.3f layers_ms=%.3f final_ms=%.3f total_ms=%.3f resident=%d\n",
-                     ids->size(), embedding_ms, layers_ms, final_ms, profile_elapsed_ms(encode_started),
-                     impl_->layers.empty() ? 0 : 1);
+        logf(log_level::debug,
+             "profile text.encode tokens=%zu embedding_ms=%.3f layers_ms=%.3f final_ms=%.3f total_ms=%.3f resident=%d",
+             ids->size(), embedding_ms, layers_ms, final_ms, profile_elapsed_ms(encode_started),
+             impl_->layers.empty() ? 0 : 1);
     }
     return pooled;
 } catch (const std::exception &error) { return std::unexpected(error.what()); }

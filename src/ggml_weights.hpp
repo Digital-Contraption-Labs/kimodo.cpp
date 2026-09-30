@@ -1,5 +1,7 @@
 #pragma once
 
+#include <kimodo/kimodo.hpp>
+
 #include <cstddef>
 #include <expected>
 #include <memory>
@@ -22,9 +24,12 @@ struct motion_graph_cache;
 // Owns a CPU-resident, F32 GGUF tensor set.  Loading is deliberately separate
 // from model-header validation so hostile files never reach a backend before
 // the checked parser has accepted their Kimodo metadata and tensor directory.
+// `path` is UTF-8.
 class ggml_motion_weights {
 public:
-    static std::expected<std::unique_ptr<ggml_motion_weights>, std::string> load(std::string_view path);
+    static std::expected<std::unique_ptr<ggml_motion_weights>, std::string> load(
+        std::string_view path, const runtime_options &options = {});
+    [[nodiscard]] const runtime_options &options() const noexcept { return options_; }
     ~ggml_motion_weights();
     ggml_motion_weights(const ggml_motion_weights &) = delete;
     ggml_motion_weights &operator=(const ggml_motion_weights &) = delete;
@@ -48,6 +53,7 @@ private:
     ggml_gallocr *allocator_ = nullptr;
     mutable std::unique_ptr<motion_graph_cache> graph_cache_;
     mutable std::unordered_map<std::string, std::vector<float>> host_f32_cache_;
+    runtime_options options_;
     std::string skeleton_;
     std::size_t motion_dim_ = 0;
     std::size_t body_dim_ = 0;

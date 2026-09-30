@@ -1,4 +1,5 @@
 #include "denoiser.hpp"
+#include "environment_options.hpp"
 #include "ggml_weights.hpp"
 #include <algorithm>
 #include <cmath>
@@ -20,7 +21,7 @@ int main(int argc, char **argv) try {
     const std::string stage(argv[3]), directory = std::string(argv[2]) + "/";
     const auto frames = static_cast<size_t>(std::stoul(argv[4]));
     if (stage != "root" && stage != "body") throw std::runtime_error("stage must be root or body");
-    auto weights = kimodo::detail::ggml_motion_weights::load(argv[1]); if (!weights) throw std::runtime_error(weights.error());
+    auto weights = kimodo::detail::ggml_motion_weights::load(argv[1], kimodo::tools::environment_options()); if (!weights) throw std::runtime_error(weights.error());
     const size_t dimension = stage == "root" ? 546 : 545;
     auto output = kimodo::detail::run_motion_transformer(
         **weights, stage + "_model.", read(directory + stage + "_input_0.f32"), dimension,

@@ -1,6 +1,7 @@
 // Small developer utility for capturing a portable F32 LLM2Vec embedding.
 // It uses the same serial GGML text session as the public prompt API.
 #include "llm_text_encoder.hpp"
+#include "environment_options.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -21,8 +22,9 @@ int main(int argc, char **argv) try {
     const std::string prompt{std::istreambuf_iterator<char>(prompt_file), {}};
     if (!prompt_file && prompt.empty()) throw std::runtime_error("cannot read prompt");
     const bool profile = std::getenv("KIMODO_PROFILE") != nullptr || repetitions > 1;
+    kimodo::tools::log_to_stderr();
     const auto load_started = std::chrono::steady_clock::now();
-    auto encoder = kimodo::detail::llm_text_encoder::load(argv[1]);
+    auto encoder = kimodo::detail::llm_text_encoder::load(argv[1], kimodo::tools::environment_options());
     if (!encoder) throw std::runtime_error(encoder.error());
     if (profile) {
         const auto elapsed = std::chrono::steady_clock::now() - load_started;

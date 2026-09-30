@@ -2,6 +2,7 @@
 // This isolates the motion transition from cross-framework RNG and text-model
 // differences, while checking both DDIM trajectories and the final blend.
 #include "denoiser.hpp"
+#include "environment_options.hpp"
 #include "ggml_weights.hpp"
 
 #include <algorithm>
@@ -68,7 +69,7 @@ int main(int argc, char **argv) try {
         return 2;
     }
     const std::string directory = std::string(argv[2]) + "/";
-    auto weights = kimodo::detail::ggml_motion_weights::load(argv[1]);
+    auto weights = kimodo::detail::ggml_motion_weights::load(argv[1], kimodo::tools::environment_options());
     if (!weights) throw std::runtime_error(weights.error());
 
     const auto first = kimodo::detail::sample_motion_from_noise(

@@ -32,7 +32,7 @@ static void motion_gguf(const char *path) {
 }
 
 int main(int argc, char **argv) {
-    assert(kimodo_abi_version() == 2);
+    assert(kimodo_abi_version() == 3);
     char error[64];
     auto *model = kimodo_model_load("does-not-exist.gguf", nullptr, nullptr, nullptr, error, sizeof(error));
     assert(model == nullptr && std::strlen(error) > 0);

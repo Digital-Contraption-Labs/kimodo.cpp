@@ -34,25 +34,18 @@ struct active_profile_guard {
     }
     ~active_profile_guard() { active_profile = previous; }
 };
-bool packed_motion_attention() noexcept {
-    const char *value = std::getenv("KIMODO_MOTION_PACKED_ATTENTION");
-    return !value || std::string_view(value) != "0";
+bool packed_motion_attention(const ggml_motion_weights &w) noexcept {
+    return w.options().motion_packed_attention;
 }
-bool motion_graph_cache_enabled() noexcept {
-    const char *value = std::getenv("KIMODO_MOTION_GRAPH_CACHE");
-    return packed_motion_attention() && (!value || std::string_view(value) != "0");
+bool motion_graph_cache_enabled(const ggml_motion_weights &w) noexcept {
+    return packed_motion_attention(w) && w.options().motion_graph_cache;
 }
-int motion_layer_chunk_size() noexcept {
-    const int fallback = packed_motion_attention() ? 8 : 4;
-    const int maximum = packed_motion_attention() ? 16 : 4;
-    const char *value = std::getenv("KIMODO_MOTION_LAYER_CHUNK");
-    if (!value) return fallback;
-    char *end = nullptr;
-    errno = 0;
-    const long parsed = std::strtol(value, &end, 10);
-    if (errno != 0 || end == value || *end != '\0' || parsed < 1 || parsed > maximum)
-        return fallback;
-    return static_cast<int>(parsed);
+int motion_layer_chunk_size(const ggml_motion_weights &w) noexcept {
+    const int fallback = packed_motion_attention(w) ? 8 : 4;
+    const int maximum = packed_motion_attention(w) ? 16 : 4;
+    const unsigned requested = w.options().motion_layer_chunk;
+    if (requested < 1 || requested > static_cast<unsigned>(maximum)) return fallback;
+    return static_cast<int>(requested);
 }
 ggml_tensor *input(ggml_context *ctx, std::span<const float> values, int a, int b, int c) {
     auto *r=ggml_new_tensor_3d(ctx,GGML_TYPE_F32,a,b,c); inputs.emplace_back(r, values); return r;
@@ -127,11 +120,11 @@ std::expected<std::unique_ptr<cached_motion_graph>, std::string> cache_graph(
     result->scratch_bytes = ggml_gallocr_get_buffer_size(result->allocator, 0);
     if (active_profile) active_profile->allocation_ms += profile_elapsed_ms(started);
     if (profile_enabled())
-        std::fprintf(stderr,
-                     "profile motion.graph_cache nodes=%d metadata_kib=%.1f scratch_mib=%.2f\n",
-                     ggml_graph_n_nodes(result->graph),
-                     static_cast<double>(ggml_used_mem(ctx))/1024.0,
-                     static_cast<double>(result->scratch_bytes)/(1024.0*1024.0));
+        logf(log_level::debug,
+             "profile motion.graph_cache nodes=%d metadata_kib=%.1f scratch_mib=%.2f",
+             ggml_graph_n_nodes(result->graph),
+             static_cast<double>(ggml_used_mem(ctx))/1024.0,
+             static_cast<double>(result->scratch_bytes)/(1024.0*1024.0));
     return result;
 }
 void bind_inputs(cached_motion_graph &graph,
@@ -214,7 +207,7 @@ ggml_tensor *weight(const ggml_motion_weights&w,std::string_view n) { auto*t=w.t
 ggml_tensor *layer(ggml_context *ctx,ggml_tensor*x,const ggml_motion_weights&w,std::string_view p,int seq,int batch) {
     const std::string s(p); auto*qkv=linear(ctx,x,weight(w,s+"self_attn.in_proj_weight"),weight(w,s+"self_attn.in_proj_bias"));
     ggml_tensor *a = nullptr;
-    if (packed_motion_attention()) {
+    if (packed_motion_attention(w)) {
         auto pack = [&](int index) {
             auto *value = ggml_view_4d(ctx, qkv, head_width, heads, seq, batch,
                                       static_cast<size_t>(head_width) * sizeof(float),
@@ -281,9 +274,9 @@ std::expected<std::vector<float>, std::string> run_motion_transformer(
 
     const int seq = prefix_tokens + static_cast<int>(frames);
     const std::string p(prefix);
-    const int layer_chunk = motion_layer_chunk_size();
+    const int layer_chunk = motion_layer_chunk_size(w);
     cached_motion_transformer *cached = nullptr;
-    if (motion_graph_cache_enabled()) {
+    if (motion_graph_cache_enabled(w)) {
         cached = transformer_cache(w, prefix, motion_dim, batch, frames, layer_chunk);
     } else if (w.graph_cache()) {
         w.graph_cache({});
@@ -405,11 +398,11 @@ std::expected<std::vector<float>, std::string> run_motion_transformer(
                           weight(w,p+"output_linear.bias"));
         });
     if (profile_enabled()) {
-        std::fprintf(stderr,
-                     "profile motion.transformer stage=%.*s calls=%u graph_ms=%.3f allocation_ms=%.3f upload_ms=%.3f compute_ms=%.3f download_ms=%.3f total_ms=%.3f\n",
-                     static_cast<int>(prefix.size() - 1), prefix.data(), profile.calls, profile.graph_ms,
-                     profile.allocation_ms, profile.upload_ms, profile.compute_ms, profile.download_ms,
-                     profile_elapsed_ms(profile_started));
+        logf(log_level::debug,
+             "profile motion.transformer stage=%.*s calls=%u graph_ms=%.3f allocation_ms=%.3f upload_ms=%.3f compute_ms=%.3f download_ms=%.3f total_ms=%.3f",
+             static_cast<int>(prefix.size() - 1), prefix.data(), profile.calls, profile.graph_ms,
+             profile.allocation_ms, profile.upload_ms, profile.compute_ms, profile.download_ms,
+             profile_elapsed_ms(profile_started));
     }
     return result;
 } catch(const std::exception&e){inputs.clear();return std::unexpected(e.what());}
@@ -485,7 +478,7 @@ std::expected<std::vector<float>, std::string> run_separated_cfg_denoiser_condit
 std::expected<std::vector<float>, std::string> sample_motion_from_noise(
     const ggml_motion_weights &weights, std::span<const float> initial,
     std::span<const float> embedding, std::size_t frames, unsigned steps,
-    float text_weight, float constraint_weight) {
+    float text_weight, float constraint_weight, const sampling_observer *observer) {
     if(initial.size()!=frames*weights.motion_dim()) return std::unexpected("invalid initial motion noise dimensions");
     auto schedule=make_cosine_schedule(1000,steps); if(!schedule)return std::unexpected(schedule.error());
     std::vector<float> state(initial.begin(),initial.end()), next(state.size());
@@ -497,7 +490,8 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise(
         if(!stepped)return std::unexpected(stepped.error());
         state.swap(next);
         if (profile_enabled())
-            std::fprintf(stderr, "profile motion.diffusion_step index=%u ms=%.3f\n", i, profile_elapsed_ms(step_started));
+            logf(log_level::debug, "profile motion.diffusion_step index=%u ms=%.3f", i, profile_elapsed_ms(step_started));
+        if (observer && *observer && !(*observer)()) return std::unexpected(std::string(cancelled_error));
     }
     return state;
 }
@@ -506,7 +500,7 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
     const ggml_motion_weights &weights, std::span<const float> initial,
     std::span<const float> embedding, std::span<const float> observed,
     std::span<const float> observed_mask, float heading, std::size_t frames,
-    unsigned steps, float text_weight, float constraint_weight) {
+    unsigned steps, float text_weight, float constraint_weight, const sampling_observer *observer) {
     if(initial.size()!=frames*weights.motion_dim() || observed.size()!=initial.size() || observed_mask.size()!=initial.size())
         return std::unexpected("invalid conditioned motion noise dimensions");
     auto schedule=make_cosine_schedule(1000,steps); if(!schedule)return std::unexpected(schedule.error());
@@ -518,6 +512,7 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
         auto stepped=ddim_step(*schedule,i,state.data(),clean->data(),next.data(),state.size());
         if(!stepped)return std::unexpected(stepped.error());
         state.swap(next);
+        if (observer && *observer && !(*observer)()) return std::unexpected(std::string(cancelled_error));
     }
     return state;
 }

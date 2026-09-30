@@ -4,7 +4,10 @@ Set `KIMODO_PROFILE=1` to print phase timings for text-component uploads,
 embedding, transformer execution, motion-weight upload, graph construction,
 graph allocation, host/device transfers, GPU compute, diffusion steps, and
 decode. GGML's lower-level Vulkan counters remain available through
-`GGML_VK_PERF_LOGGER=1`.
+`GGML_VK_PERF_LOGGER=1`. These variables, like the other `KIMODO_*` ones
+below, are read by the command-line tools, which pass them to the library as
+options; the library reads none itself. A host of the shared library gets the
+same timings at `KIMODO_LOG_DEBUG` through `kimodo_set_log_callback`.
 
 The measurements below were taken on an NVIDIA GeForce RTX 5070 Ti (16 GiB)
 with the 19-token jump exemplar, the Q8_0 text bundle, and a 60-frame SOMA

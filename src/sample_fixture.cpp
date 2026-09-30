@@ -1,6 +1,7 @@
 // Developer utility: replay an upstream capture with the exact F32 embedding
 // and initial diffusion noise, then emit GGML's comparable raw/decoded output.
 #include "denoiser.hpp"
+#include "environment_options.hpp"
 #include "ggml_weights.hpp"
 #include "motion_decode.hpp"
 #include "skeleton.hpp"
@@ -55,7 +56,7 @@ int main(int argc, char **argv) try {
     const std::filesystem::path fixture(argv[2]), output(argv[5]);
     const auto embedding = read_f32(fixture / "text_features.f32");
     const auto noise = read_f32(fixture / "sampling_initial_noise.f32");
-    auto weights = kimodo::detail::ggml_motion_weights::load(argv[1]);
+    auto weights = kimodo::detail::ggml_motion_weights::load(argv[1], kimodo::tools::environment_options());
     if (!weights) throw std::runtime_error(weights.error());
     const auto *skeleton=kimodo::detail::find_skeleton((*weights)->skeleton_key());
     if (!skeleton || embedding.size() != 4096 || noise.size() != frames * skeleton->motion_dim())

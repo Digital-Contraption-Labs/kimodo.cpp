@@ -14,8 +14,9 @@ translations on CPU or Vulkan:
 
 NVIDIA's Python API expands SOMA's predicted 30 joints to a relaxed-hand
 77-joint presentation skeleton. The native API currently returns the 30 joints
-the model actually predicts. The text encoder uses eight-layer Vulkan chunks by
-default; set `KIMODO_TEXT_LAYER_CHUNK=1..32` to tune VRAM use.
+the model actually predicts. The text encoder stays resident on the GPU when
+the GPU has room for it beside the motion model, and otherwise streams through in
+eight-layer chunks; the tools take `KIMODO_TEXT_LAYER_CHUNK=1..32` to choose.
 
 Included: checked GGUF loading, safetensors conversion, DDIM sampling, C/C++
 APIs, conditioned multi-prompt transitions, kinematic constraints (full-body
@@ -118,12 +119,24 @@ service alone, in memory, for a client such as ContraptionFabricator's Clip
 Editor; `scripts\stop-demo.bat` and `scripts\stop-server.bat` stop it from
 anywhere.
 
+For a host application that runs the engine in its own process instead of
+talking to the server, `scripts\build\build_library_windows.bat` builds
+`kimodo.dll` (the engine and ggml in one file, exporting only the C API in
+`include/kimodo/kimodo_capi.h`), checks its exports and dependencies, and
+packages it with the header, licences, `VERSION.json` and the weights from
+the local cache into `dist\kimodo-windows`. `scripts\build\stage_to_cf.bat
+--cf <folder>` copies that package into ContraptionFabricator. The plan for
+the library and its other platforms is in
+[`docs/SHARED_LIBRARY_PLAN.md`](docs/SHARED_LIBRARY_PLAN.md).
+
 The demo keeps all 32 layers of its default Q8 text encoder in VRAM for maximum
 throughput, while executing them as bounded eight-layer GGML graphs. Its 10 GiB
 residency ceiling makes the larger BF16 reference stream in bounded groups on a
-16 GiB GPU. Library and command-line callers retain the lower-memory eight-layer
-default; set `KIMODO_TEXT_LAYER_CHUNK=32` for residency and optionally set
-`KIMODO_TEXT_RESIDENT_LIMIT_MIB` to enforce a VRAM-safe bundle-size ceiling.
+16 GiB GPU. Elsewhere the library decides: the encoder is resident when the
+GPU has room for it beside the motion model (the C API's `text_layer_chunk`
+and `text_resident_limit_mib` override that; the tools take
+`KIMODO_TEXT_LAYER_CHUNK` and `KIMODO_TEXT_RESIDENT_LIMIT_MIB`). The library
+itself reads no environment variables.
 The demo reuses one native worker while the selected motion model and text
 quantization remain unchanged, preserving both weight sets across requests.
 Profiling controls, measurements, and the next optimization targets are in
