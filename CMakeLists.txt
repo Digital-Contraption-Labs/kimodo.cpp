@@ -16,6 +16,7 @@ option(KIMODO_ENABLE_FUZZERS "Build libFuzzer parser targets" OFF)
 set(KIMODO_GGML_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml" CACHE PATH "Pinned GGML submodule source directory")
 option(KIMODO_ENABLE_POSTPROCESS "Build upstream motion post-processing (x86, needs Eigen)" ON)
 set(KIMODO_EIGEN_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/eigen" CACHE PATH "Pinned Eigen submodule source directory")
+set(KIMODO_VULKAN_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-headers/include" CACHE PATH "Pinned Vulkan-Headers submodule include directory, used on Linux and Android")
 set(KIMODO_ROOT_PARITY_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/models/kimodo-smplx-rp-v1-f32.gguf" CACHE FILEPATH "F32 motion GGUF required by parity tests")
 set(KIMODO_ROOT_PARITY_FIXTURE "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/smplx-zero-embedding" CACHE PATH "Fixture directory required by motion parity tests")
 set(KIMODO_LLM_TEXT_BUNDLE "${CMAKE_CURRENT_SOURCE_DIR}/generated/llm2vec-text-bundle" CACHE PATH "Native LLM2Vec GGUF component bundle required by text parity tests")
@@ -61,6 +62,25 @@ if(MSVC)
 else()
   target_compile_options(kimodo-core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
   target_compile_options(kimodo PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Clang's -Wconversion also covers signedness, which GCC's leaves out;
+    # the same warnings on every compiler.
+    target_compile_options(kimodo-core PRIVATE -Wno-sign-conversion)
+    target_compile_options(kimodo PRIVATE -Wno-sign-conversion)
+  endif()
+endif()
+if(CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android)$")
+  # Only the C API leaves the .so: the symbols of the static archives it
+  # links (kimodo-core, ggml, the C++ runtime) stay inside, and nothing may
+  # be left for the loader to find elsewhere.
+  target_link_options(kimodo PRIVATE -Wl,--exclude-libs,ALL -Wl,--no-undefined
+    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/kimodo.map")
+  set_property(TARGET kimodo APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/kimodo.map")
+  if(NOT ANDROID)
+    # A host built with another libstdc++ loads it all the same; Android
+    # takes c++_static from its toolchain instead (ANDROID_STL).
+    target_link_options(kimodo PRIVATE -static-libstdc++ -static-libgcc)
+  endif()
 endif()
 # A C program that loads the shared library at run time, as a host
 # application does, using kimodo_capi.h alone.
@@ -69,6 +89,8 @@ target_include_directories(kimodo-capi-smoke PRIVATE "${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(kimodo-capi-smoke PRIVATE ${CMAKE_DL_LIBS})
 if(WIN32)
   target_link_libraries(kimodo-capi-smoke PRIVATE shell32) # UTF-8 arguments
+elseif(NOT APPLE)
+  target_link_libraries(kimodo-capi-smoke PRIVATE m)
 endif()
 add_dependencies(kimodo-capi-smoke kimodo)
 if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
@@ -83,6 +105,19 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
   # without OpenMP, whose runtime is not on every machine.
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+  # ggml's Vulkan backend needs newer headers than Debian 12 or the Android
+  # NDK ship, so Linux and Android compile against the pinned vulkan-headers
+  # and spirv-headers submodules (the version of the Windows Vulkan SDK, whose
+  # own headers Windows uses).  Only headers: the program still loads the
+  # system's Vulkan loader.  A cross build's sysroot has neither, and the
+  # host's must not leak into it.
+  set(KIMODO_PINNED_VULKAN_HEADERS FALSE)
+  if(KIMODO_ENABLE_VULKAN AND NOT WIN32 AND NOT APPLE AND EXISTS "${KIMODO_VULKAN_HEADERS_DIR}/vulkan/vulkan.hpp"
+     AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/spirv-headers/include/spirv/unified1/spirv.hpp")
+    set(KIMODO_PINNED_VULKAN_HEADERS TRUE)
+    set(Vulkan_INCLUDE_DIR "${KIMODO_VULKAN_HEADERS_DIR}" CACHE PATH "Vulkan headers" FORCE)
+    set(SPIRV-Headers_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/spirv-headers" CACHE PATH "SPIR-V headers' CMake package" FORCE)
+  endif()
   add_subdirectory("${KIMODO_GGML_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/ggml" EXCLUDE_FROM_ALL)
   get_directory_property(KIMODO_GGML_VERSION DIRECTORY "${KIMODO_GGML_SOURCE_DIR}" DEFINITION GGML_VERSION)
   get_directory_property(KIMODO_GGML_COMMIT DIRECTORY "${KIMODO_GGML_SOURCE_DIR}" DEFINITION GGML_BUILD_COMMIT)
@@ -92,6 +127,10 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
   if(KIMODO_ENABLE_VULKAN AND TARGET ggml-vulkan)
     set(KIMODO_VK_LIBS ggml-vulkan)
     set(KIMODO_VK_DEFS KIMODO_HAVE_GGML_VULKAN=1)
+    if(KIMODO_PINNED_VULKAN_HEADERS)
+      # ggml includes spirv.hpp without linking the SPIR-V headers' target.
+      target_include_directories(ggml-vulkan SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/spirv-headers/include")
+    endif()
   endif()
   target_link_libraries(kimodo-core PRIVATE ggml ${KIMODO_VK_LIBS})
   target_compile_definitions(kimodo-core PRIVATE KIMODO_HAVE_GGML=1 ${KIMODO_VK_DEFS})
@@ -100,12 +139,21 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
   target_sources(kimodo-core PRIVATE src/backend.cpp src/ggml_weights.cpp src/denoiser.cpp src/sequence.cpp)
   target_sources(kimodo-core PRIVATE src/llm_tokenizer.cpp src/llm_text_encoder.cpp)
   # NVIDIA's MotionCorrection (vendored, unmodified) behind post-processing.
-  # Its math library is SSE code built for AVX as upstream builds it, and its
-  # solvers are Eigen's.  Every file that includes Eigen lives in this one
-  # target: Eigen's allocation alignment follows the instruction set, so
-  # mixing flags across translation units corrupts the heap.
-  if(KIMODO_ENABLE_POSTPROCESS AND EXISTS "${KIMODO_EIGEN_SOURCE_DIR}/Eigen/Sparse"
-     AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64|i[3-6]86|x86)$")
+  # Its math library is SSE code, built for AVX on x86 as upstream builds it
+  # and through sse2neon on ARM64; its solvers are Eigen's.  Every file that
+  # includes Eigen lives in this one target: Eigen's allocation alignment
+  # follows the instruction set, so mixing flags across translation units
+  # corrupts the heap.
+  set(KIMODO_POSTPROCESS_SIMD "")
+  if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR
+     (NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$"))
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sse2neon/sse2neon.h")
+      set(KIMODO_POSTPROCESS_SIMD neon)
+    endif()
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64|i[3-6]86|x86)$")
+    set(KIMODO_POSTPROCESS_SIMD sse)
+  endif()
+  if(KIMODO_ENABLE_POSTPROCESS AND EXISTS "${KIMODO_EIGEN_SOURCE_DIR}/Eigen/Sparse" AND KIMODO_POSTPROCESS_SIMD)
     set(KIMODO_HAVE_POSTPROCESS TRUE)
     file(GLOB KIMODO_MOTION_CORRECTION_SOURCES CONFIGURE_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/third_party/motion_correction/Math/*.cpp"
@@ -116,7 +164,15 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
       "${CMAKE_CURRENT_SOURCE_DIR}/third_party/motion_correction" "${KIMODO_EIGEN_SOURCE_DIR}")
     target_compile_definitions(kimodo-postprocess PRIVATE EIGEN_MPL2_ONLY)
     set_target_properties(kimodo-postprocess PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    if(MSVC)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      # MotionCorrection's Compiler.h defines FORCE_INLINE for MSVC and GCC
+      # only; Clang (the Android NDK, Apple) takes GCC's.
+      target_compile_definitions(kimodo-postprocess PRIVATE "FORCE_INLINE=inline __attribute__((always_inline))")
+    endif()
+    if(KIMODO_POSTPROCESS_SIMD STREQUAL "neon")
+      # MotionCorrection's <immintrin.h> is sse2neon's (see its README).
+      target_include_directories(kimodo-postprocess BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sse2neon/include")
+    elseif(MSVC)
       target_compile_options(kimodo-postprocess PRIVATE /arch:AVX)
     else()
       target_compile_options(kimodo-postprocess PRIVATE -msse4.1 -mavx)
@@ -124,7 +180,7 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
     target_link_libraries(kimodo-core PRIVATE kimodo-postprocess)
     target_compile_definitions(kimodo-core PRIVATE KIMODO_HAVE_POSTPROCESS=1)
   else()
-    message(STATUS "kimodo: post-processing disabled (needs x86 and ${KIMODO_EIGEN_SOURCE_DIR})")
+    message(STATUS "kimodo: post-processing disabled (needs x86 or ARM64, and ${KIMODO_EIGEN_SOURCE_DIR})")
   endif()
   # Tools and fixture tests that compile engine sources themselves rather
   # than linking kimodo-core: the runtime pieces those sources share.
@@ -315,6 +371,7 @@ set(KIMODO_BUILD_GGML_VERSION "@KIMODO_GGML_VERSION@")
 set(KIMODO_BUILD_GGML_COMMIT "@KIMODO_GGML_COMMIT@")
 set(KIMODO_BUILD_BACKENDS "@KIMODO_BACKENDS@")
 set(KIMODO_BUILD_POSTPROCESS "@KIMODO_HAVE_POSTPROCESS@")
+set(KIMODO_BUILD_POSTPROCESS_SIMD "@KIMODO_POSTPROCESS_SIMD@")
 set(KIMODO_BUILD_CPU_FEATURES "@KIMODO_CPU_FEATURES@")
 ]] @ONLY)
 if(KIMODO_ENABLE_FUZZERS)

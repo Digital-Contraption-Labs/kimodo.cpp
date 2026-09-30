@@ -553,6 +553,41 @@ decisions of section 2.
   - Also: cancel returns `KIMODO_CANCELLED`; `kimodo_encode_text` +
     `kimodo_generate_embedding` equals `kimodo_generate`.
 
+**Steps 4 and 5, Linux and Android, done 2026-09-29.**
+
+- Headers: ggml's Vulkan backend needs newer Vulkan headers than Debian 12
+  (1.3.239) or the NDK (1.3.275, and no `vulkan.hpp`) ship, and it includes
+  `spirv.hpp` without linking the SPIR-V headers it looks up.  Linux and
+  Android therefore compile against two pinned submodules at the Windows
+  SDK's version, `vulkan-headers` (v1.4.350) and `spirv-headers`
+  (vulkan-sdk-1.4.350.0), with `cmake/spirv-headers/` answering ggml's
+  `find_package`; a cross build uses nothing of the host's but glslc.
+- ELF exports: `--exclude-libs,ALL`, and a version script (`src/kimodo.map`)
+  for the unique globals libstdc++'s templates emit whatever the visibility.
+  Linux links libstdc++ and libgcc statically; Android uses `c++_static`.
+- Post-processing on ARM64 through sse2neon 1.9.1 (vendored, MIT) and a shim
+  `third_party/sse2neon/include/immintrin.h` that adds AVX's
+  `_mm_permutevar_ps`; MotionCorrection stays unmodified.  Its `Compiler.h`
+  defines `FORCE_INLINE` for MSVC and GCC only, so Clang builds (the NDK,
+  Apple) get GCC's definition from CMake.
+- Linux (`build_library_linux.sh`, or `.bat` through WSL's Debian12):
+  `libkimodo.so`, 29 exports, needs `libvulkan.so.1`, `libm`, `libc` and the
+  loader, glibc 2.36 or later (recorded in `VERSION.json`).  Run in WSL on
+  the CPU: loads, and generates a post-processed clip (60 frames, 10 steps,
+  34 s).  A GPU run needs a Linux machine.
+- ARM64 checked without ARM hardware: an aarch64 Linux cross build under
+  QEMU passes `postprocess_test` (smoother 4.8e-7 m from upstream's values;
+  keyframe and hand pinned to 0.0000 m; foot skate 0.095 m to 0), and the
+  aarch64 library loads with post-processing present.
+- Android (`build_library_android.bat` or `.sh`): NDK 27.2.12479018,
+  arm64-v8a, API 29, `c++_static`, 16 KB-aligned segments (checked).  The
+  package holds `lib/arm64-v8a/libkimodo.so` stripped (39 MB), its symbols in
+  `symbols/` (82 MB), the motion models only, and an ARM build of the smoke
+  test with the `adb` commands to run it; `--save-embedding` on a desktop and
+  `--no-text --embedding-file` on the device carry a prompt across.  Built,
+  checked and packaged; not yet run on a device.
+- Every package now carries `tools/kimodo-capi-smoke`.
+
 ## 12. Questions that are the owner's to answer
 
 Answered on 2026-09-29; see "Decisions" in section 2.  Still open, none of

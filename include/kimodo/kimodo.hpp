@@ -192,7 +192,7 @@ public:
         std::span<const prompt_segment> segments, unsigned transition_frames,
         unsigned steps, std::uint64_t seed, float text_cfg, float constraint_cfg,
         const generation_options &options = {}) const;
-    // Whether this build includes post-processing (x86 with Eigen).
+    // Whether this build includes post-processing (x86 or ARM64, with Eigen).
     [[nodiscard]] static bool post_processing_available() noexcept;
     ~model();
     model(const model &) = delete;

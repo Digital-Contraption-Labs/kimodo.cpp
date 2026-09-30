@@ -20,8 +20,12 @@
  *         --cancel-after N cancel at the Nth diffusion step
  *         --cycles N       open, generate and free N times, printing memory
  *         --dump PREFIX    write the clip to PREFIX.root.f32, PREFIX.rotations.f32
+ *         --save-embedding F   write the first prompt's embedding to F
+ *         --no-text --embedding-file F
+ *                          open without the text encoder, as on a phone, and
+ *                          generate from an embedding saved elsewhere
  *   Common: --prompt P (repeat --prompt/--frames for segments), --frames N,
- *   --steps N, --seed N, --motion-name F, --gpu N, --log, --max-frames N.
+ *   --steps N, --seed N, --motion-name F, --gpu N, --cpu, --log, --max-frames N.
  *
  * Each stage prints a line; clips end with their shape and a checksum.
  * Exits 0 when every check passed.
@@ -224,12 +228,12 @@ static int write_floats(const char *path, const float *values, size_t count) {
 /* ---- Settings -------------------------------------------------------------- */
 #define MAX_SEGMENTS 16
 static struct {
-    const char *library, *motion, *text, *data, *motion_name, *constraints, *dump;
+    const char *library, *motion, *text, *data, *motion_name, *constraints, *dump, *save_embedding, *embedding_file;
     kimodo_segment segments[MAX_SEGMENTS];
     uint32_t segment_count;
     unsigned long frames, steps, cycles, gpu, max_frames;
     unsigned long long seed;
-    int keyframe, embedding, log, cancel_after;
+    int keyframe, embedding, log, cancel_after, cpu, no_text;
 } settings;
 
 static void usage(FILE *out) {
@@ -238,7 +242,8 @@ static void usage(FILE *out) {
         "         [--motion <gguf> --text <gguf> | --data <folder> [--motion-name <file>]]\n"
         "         [--prompt <text> [--frames N]]... [--steps N] [--seed N] [--gpu N] [--max-frames N]\n"
         "         [--keyframe] [--embedding] [--constraints <json>] [--cancel-after N] [--cycles N]\n"
-        "         [--dump <prefix>] [--log]\n"
+        "         [--dump <prefix>] [--log] [--cpu] [--save-embedding <file>]\n"
+        "         [--no-text --embedding-file <file>]\n"
         "\n"
         "Loads the Kimodo shared library at run time and checks it through the C\n"
         "API.  See the comment at the top of tests/capi_smoke.c for what each\n"
@@ -442,9 +447,10 @@ static kimodo_model *open_model(void) {
     api.runtime_options_init(&runtime);
     runtime.gpu_index = (uint32_t)settings.gpu;
     runtime.max_segment_frames = (uint32_t)settings.max_frames;
+    if (settings.cpu) runtime.device = KIMODO_DEVICE_CPU;
     char error[1024] = {0};
     const double started = now_seconds();
-    kimodo_model *model = api.open(settings.data, settings.motion_name, NULL, &runtime, error, (int)sizeof error);
+    kimodo_model *model = api.open(settings.data, settings.motion_name, settings.no_text ? "" : NULL, &runtime, error, (int)sizeof error);
     if (!model) { printf("  kimodo_open: %s\n", error); return NULL; }
     printf("opened %s in %.1f s: skeleton %s, %d joints\n", settings.data, now_seconds() - started,
            api.model_skeleton(model), api.model_joints(model));
@@ -508,6 +514,46 @@ static int data_folder_run(void) {
            defaults.diffusion_steps, defaults.text_cfg_weight, defaults.constraint_cfg_weight, defaults.transition_frames,
            defaults.post_process ? "on" : "off");
 
+    if (settings.save_embedding) {
+        /* For a target without the text encoder: its prompt, encoded here. */
+        float embedding[4096];
+        char error[1024] = {0};
+        if (api.encode_text(model, settings.segments[0].prompt, embedding, error, (int)sizeof error) != KIMODO_OK) {
+            printf("  kimodo_encode_text: %s\n", error);
+            fail("kimodo_encode_text");
+        } else if (!write_floats(settings.save_embedding, embedding, 4096)) {
+            fail("writing the embedding");
+        } else {
+            printf("embedding of \"%s\" written to %s\n", settings.segments[0].prompt, settings.save_embedding);
+        }
+    }
+    if (settings.no_text) {
+        /* No text encoder (a phone): generate from an embedding file. */
+        float embedding[4096];
+        FILE *file = settings.embedding_file ? fopen(settings.embedding_file, "rb") : NULL;
+        const int read = file && fread(embedding, sizeof(float), 4096, file) == 4096;
+        if (file) fclose(file);
+        if (!read) {
+            fprintf(stderr, "--no-text needs --embedding-file with 4096 floats (make one with --save-embedding)\n");
+            api.model_free(model);
+            return 1;
+        }
+        kimodo_generation_options options;
+        api.generation_options_init(model, &options);
+        options.seed = settings.seed;
+        options.diffusion_steps = (uint32_t)settings.steps;
+        options.frames = settings.segments[0].frames;
+        kimodo_embedding input = {embedding, 4096};
+        char error[1024] = {0};
+        const double started = now_seconds();
+        kimodo_motion *clip = api.generate_embedding(model, &input, &options, error, (int)sizeof error);
+        if (!clip) { printf("  kimodo_generate_embedding: %s\n", error); fail("generation from the embedding"); }
+        else describe("clip from the embedding", clip, now_seconds() - started);
+        api.motion_free(clip);
+        api.model_free(model);
+        return failures != 0;
+    }
+
     char *json = NULL;
     if (settings.constraints) {
         json = read_file(settings.constraints);
@@ -559,6 +605,8 @@ static int run(int argc, char **argv) {
         if (!strcmp(arg, "--keyframe")) { settings.keyframe = 1; continue; }
         if (!strcmp(arg, "--embedding")) { settings.embedding = 1; continue; }
         if (!strcmp(arg, "--log")) { settings.log = 1; continue; }
+        if (!strcmp(arg, "--cpu")) { settings.cpu = 1; continue; }
+        if (!strcmp(arg, "--no-text")) { settings.no_text = 1; continue; }
         const char *value = i + 1 < argc ? argv[i + 1] : NULL;
         if (!value) { fprintf(stderr, "%s needs a value\n\n", arg); usage(stderr); return 2; }
         if (!strcmp(arg, "--library")) settings.library = value;
@@ -568,6 +616,8 @@ static int run(int argc, char **argv) {
         else if (!strcmp(arg, "--motion-name")) settings.motion_name = value;
         else if (!strcmp(arg, "--constraints")) settings.constraints = value;
         else if (!strcmp(arg, "--dump")) settings.dump = value;
+        else if (!strcmp(arg, "--save-embedding")) settings.save_embedding = value;
+        else if (!strcmp(arg, "--embedding-file")) settings.embedding_file = value;
         else if (!strcmp(arg, "--prompt")) {
             if (settings.segment_count == MAX_SEGMENTS) { fprintf(stderr, "at most %d prompts\n", MAX_SEGMENTS); return 2; }
             settings.segments[settings.segment_count].prompt = value;
@@ -637,6 +687,7 @@ static int run(int argc, char **argv) {
         kimodo_runtime_options runtime;
         api.runtime_options_init(&runtime);
         runtime.gpu_index = (uint32_t)settings.gpu;
+        if (settings.cpu) runtime.device = KIMODO_DEVICE_CPU;
         double started = now_seconds();
         kimodo_model *model = api.model_load(settings.motion, settings.text, NULL, &runtime, error, (int)sizeof error);
         if (!model) {

@@ -1,0 +1,8 @@
+/* libkimodo.so's exports on ELF targets (Linux, Android): the C API and
+ * nothing else.  --exclude-libs hides the static archives' symbols; this also
+ * hides what the compiler emits as unique globals regardless of visibility,
+ * such as libstdc++'s inline template statics. */
+{
+  global: kimodo_*;
+  local: *;
+};

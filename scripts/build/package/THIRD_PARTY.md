@@ -11,8 +11,9 @@ compiled into it.  Their licence texts are in `licenses/`.
 | [nlohmann/json](https://github.com/nlohmann/json) 3.11.3 | reads NVIDIA's constraints JSON | MIT | `licenses/nlohmann-json-LICENSE.MIT` |
 | NVIDIA Kimodo MotionCorrection, commit `58e781898b3d` | post-processing: foot-skate cleanup and IK onto constraints | Apache-2.0 | `licenses/MotionCorrection-LICENSE` |
 | [Eigen](https://eigen.tuxfamily.org) 3.4.0, built with `EIGEN_MPL2_ONLY` | linear solvers behind MotionCorrection | MPL-2.0 | `licenses/Eigen-COPYING.MPL2` |
+| [sse2neon](https://github.com/DLTcollab/sse2neon) 1.9.1, ARM64 builds only | MotionCorrection's SSE maths on NEON | MIT | `licenses/sse2neon-LICENSE` |
 
 MotionCorrection and Eigen are compiled in only when `VERSION.json` says
-`"post_processing": true`.
+`"post_processing": true`, and sse2neon only in ARM64 builds of it.
 
 The model weights are not code and keep their own terms; see `WEIGHTS.md`.

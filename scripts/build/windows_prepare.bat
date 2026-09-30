@@ -46,6 +46,15 @@ if exist "%KIMODO_PREPARE_ROOT%\eigen\Eigen\Sparse" goto have_eigen
 echo Checking out the eigen submodule...
 git -C "%KIMODO_PREPARE_ROOT%" submodule update --init --recursive -- eigen || goto submodule_failed
 :have_eigen
+rem The Vulkan and SPIR-V headers Android builds compile against.
+if exist "%KIMODO_PREPARE_ROOT%\vulkan-headers\include\vulkan\vulkan.hpp" goto have_vulkan_headers
+echo Checking out the vulkan-headers submodule...
+git -C "%KIMODO_PREPARE_ROOT%" submodule update --init -- vulkan-headers || goto submodule_failed
+:have_vulkan_headers
+if exist "%KIMODO_PREPARE_ROOT%\spirv-headers\include\spirv\unified1\spirv.hpp" goto have_spirv_headers
+echo Checking out the spirv-headers submodule...
+git -C "%KIMODO_PREPARE_ROOT%" submodule update --init -- spirv-headers || goto submodule_failed
+:have_spirv_headers
 exit /b 0
 
 :no_visual_studio

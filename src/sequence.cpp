@@ -75,7 +75,7 @@ std::expected<std::vector<float>, std::string> sample_motion_sequence_from_noise
     const size_t D=weights.motion_dim(),body=D-5;
     if(segments.empty()||!transition_frames||!D)return std::unexpected("sequence requires segments and a transition");
 #ifndef KIMODO_HAVE_POSTPROCESS
-    if(post)return std::unexpected("this build has no post-processing (it needs x86 and the eigen submodule)");
+    if(post)return std::unexpected("this build has no post-processing (it needs x86 or ARM64, and the eigen submodule)");
 #endif
     const auto *skeleton=find_skeleton(weights.skeleton_key());
     if(post&&(!skeleton||!post->targets||skeleton->motion_dim()!=D))return std::unexpected("invalid post-processing request");
@@ -120,7 +120,8 @@ std::expected<std::vector<float>, std::string> sample_motion_sequence_from_noise
                 normalize(observed);
                 sampled=sample_motion_from_noise_conditioned(weights,segment.initial_noise,segment.embedding,observed,mask,first_heading,sampled_frames,steps,text_weight,constraint_weight,observer);
             }else sampled=sample_motion_from_noise(weights,segment.initial_noise,segment.embedding,sampled_frames,steps,text_weight,constraint_weight,observer);
-            if(!sampled)return std::unexpected(sampled.error());current=std::move(*sampled);unnormalize(current);
+            if(!sampled)return std::unexpected(sampled.error());
+            current=std::move(*sampled);unnormalize(current);
 #ifdef KIMODO_HAVE_POSTPROCESS
             if(post)if(auto done=post_process(current,sampled_frames,post->targets->slice(0,sampled_frames,skeleton->joints()));!done)return std::unexpected(done.error());
 #endif

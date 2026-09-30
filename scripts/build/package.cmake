@@ -2,18 +2,28 @@
 # (docs/SHARED_LIBRARY_PLAN.md, section 8).  The platform build scripts in
 # this folder run it after their build:
 #
-#   cmake -DKIMODO_TARGET=windows -DKIMODO_SOURCE_DIR=<repository>
+#   cmake -DKIMODO_TARGET=windows|linux|android -DKIMODO_SOURCE_DIR=<repository>
 #         -DKIMODO_BUILD_DIR=<build folder> -DKIMODO_PACKAGE_DIR=<package folder>
-#         [-DKIMODO_WEIGHTS=OFF] [-DKIMODO_WEIGHTS_DIR=<weights cache>]
+#         [-DKIMODO_WEIGHTS=OFF] [-DKIMODO_TEXT_WEIGHTS=OFF] [-DKIMODO_WEIGHTS_DIR=<weights cache>]
+#         [-DKIMODO_ANDROID_ABI=arm64-v8a] [-DKIMODO_NM=<nm>] [-DKIMODO_READELF=<readelf>]
+#         [-DKIMODO_STRIP=<strip>]
 #         -P scripts/build/package.cmake
 #
 # The package:
 #
 #   include/kimodo/kimodo_capi.h
 #   bin/kimodo.dll, bin/kimodo.pdb, lib/kimodo.lib     (windows)
+#   lib/libkimodo.so                                   (linux)
+#   lib/<abi>/libkimodo.so, symbols/<abi>/libkimodo.so (android: stripped as
+#                           jniLibs lays it out, and with its symbols for
+#                           reading crash reports)
+#   tools/kimodo-capi-smoke    loads the library and generates a clip, to check
+#                              an install (on Android, run it through adb)
 #   LICENSE  NOTICE  THIRD_PARTY.md  licenses/
 #   VERSION.json    ABI, version, commit, ggml, backends, post-processing
-#   weights/        the weights in the cache, and WEIGHTS.md describing them
+#   weights/        the weights in the cache, and WEIGHTS.md describing them;
+#                   KIMODO_TEXT_WEIGHTS=OFF leaves the text encoder out, as the
+#                   Android packages do: no phone holds it beside an app
 #
 # The weights cache is the repository root by default: motion models in
 # models/, the text encoder and tokenizer.gguf beside it, where
@@ -22,9 +32,10 @@
 # when they changed, and their SHA-256 is remembered in weights/.sha256-cache
 # for the same reason: 11 GB is slow to copy and to hash.
 #
-# On Windows the library is checked before it is packaged: it must export
-# kimodo_* and nothing else, and import only system DLLs, the Visual C++
-# runtime and the Vulkan loader.  A failed check stops the packaging.
+# The library is checked before it is packaged: it must export kimodo_* and
+# nothing else, and import only the system's libraries, its C/C++ runtime and
+# the Vulkan loader (dumpbin on Windows, nm and readelf on ELF targets).  A
+# failed check stops the packaging.
 
 cmake_minimum_required(VERSION 3.25)
 
@@ -35,6 +46,12 @@ foreach(required KIMODO_TARGET KIMODO_SOURCE_DIR KIMODO_BUILD_DIR KIMODO_PACKAGE
 endforeach()
 if(NOT DEFINED KIMODO_WEIGHTS)
   set(KIMODO_WEIGHTS ON)
+endif()
+if(NOT DEFINED KIMODO_TEXT_WEIGHTS)
+  set(KIMODO_TEXT_WEIGHTS ON)
+endif()
+if(NOT DEFINED KIMODO_ANDROID_ABI OR KIMODO_ANDROID_ABI STREQUAL "")
+  set(KIMODO_ANDROID_ABI arm64-v8a)
 endif()
 if(NOT DEFINED KIMODO_WEIGHTS_DIR OR KIMODO_WEIGHTS_DIR STREQUAL "")
   set(KIMODO_WEIGHTS_DIR "${KIMODO_SOURCE_DIR}")
@@ -100,9 +117,27 @@ function(json_array out_var)
 endfunction()
 
 # ---- The library ---------------------------------------------------------
+set(elf FALSE)
+set(strip_library "")
 if(KIMODO_TARGET STREQUAL "windows")
-  set(binaries "bin/kimodo.dll" "bin/kimodo.pdb" "lib/kimodo.lib")
-  set(sources "${build}/kimodo.dll" "${build}/kimodo.pdb" "${build}/kimodo.lib")
+  set(binaries "bin/kimodo.dll" "bin/kimodo.pdb" "lib/kimodo.lib" "tools/kimodo-capi-smoke.exe")
+  set(sources "${build}/kimodo.dll" "${build}/kimodo.pdb" "${build}/kimodo.lib" "${build}/kimodo-capi-smoke.exe")
+elseif(KIMODO_TARGET STREQUAL "linux")
+  set(elf TRUE)
+  set(binaries "lib/libkimodo.so" "tools/kimodo-capi-smoke")
+  set(sources "${build}/libkimodo.so" "${build}/kimodo-capi-smoke")
+  # glibc, the Vulkan loader and the dynamic linker; the C++ runtime is
+  # linked in statically.
+  set(allowed_imports "^(libc\\.so\\.6|libm\\.so\\.6|libdl\\.so\\.2|libpthread\\.so\\.0|librt\\.so\\.1|libvulkan\\.so\\.1|ld-linux-[a-z0-9_-]+\\.so\\.[0-9])$")
+elseif(KIMODO_TARGET STREQUAL "android")
+  set(elf TRUE)
+  set(abi "${KIMODO_ANDROID_ABI}")
+  set(binaries "symbols/${abi}/libkimodo.so" "tools/${abi}/kimodo-capi-smoke")
+  set(sources "${build}/libkimodo.so" "${build}/kimodo-capi-smoke")
+  # lib/<abi>/libkimodo.so is the stripped copy of symbols/<abi>/libkimodo.so.
+  set(strip_library "lib/${abi}/libkimodo.so")
+  # Bionic and the Vulkan loader; the C++ runtime is c++_static.
+  set(allowed_imports "^(libc|libm|libdl|liblog|libvulkan|libandroid)\\.so$")
 else()
   message(FATAL_ERROR "package.cmake does not package '${KIMODO_TARGET}' yet")
 endif()
@@ -168,6 +203,93 @@ if(KIMODO_TARGET STREQUAL "windows")
   message(STATUS "kimodo.dll imports ${import_text}")
 endif()
 
+set(glibc "")
+if(elf)
+  list(GET sources 0 library)
+  get_filename_component(library_name "${library}" NAME)
+  # The binutils tools, or LLVM's under a cross toolchain (-DKIMODO_NM=...).
+  if(NOT KIMODO_NM)
+    find_program(KIMODO_NM NAMES nm llvm-nm)
+  endif()
+  if(NOT KIMODO_READELF)
+    find_program(KIMODO_READELF NAMES readelf llvm-readelf)
+  endif()
+  if(NOT KIMODO_NM OR NOT KIMODO_READELF)
+    message(FATAL_ERROR "nm and readelf are needed to check ${library_name}: install binutils")
+  endif()
+  execute_process(COMMAND "${KIMODO_NM}" -D --defined-only "${library}" OUTPUT_VARIABLE dump RESULT_VARIABLE result)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "nm -D failed on ${library}")
+  endif()
+  string(REGEX MATCHALL "[0-9a-fA-F]+ [A-Za-z] [^ \r\n]+" rows "${dump}")
+  set(exports)
+  set(foreign)
+  foreach(row IN LISTS rows)
+    string(REGEX REPLACE "^[0-9a-fA-F]+ [A-Za-z] ([^@]+).*$" "\\1" name "${row}")
+    list(APPEND exports "${name}")
+    if(NOT name MATCHES "^kimodo_")
+      list(APPEND foreign "${name}")
+    endif()
+  endforeach()
+  list(LENGTH exports export_count)
+  if(export_count EQUAL 0)
+    message(FATAL_ERROR "${library_name} exports nothing")
+  endif()
+  if(foreign)
+    list(JOIN foreign ", " foreign)
+    message(FATAL_ERROR "${library_name} exports symbols outside the C API: ${foreign}")
+  endif()
+  execute_process(COMMAND "${KIMODO_READELF}" -d "${library}" OUTPUT_VARIABLE dump RESULT_VARIABLE result)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "readelf -d failed on ${library}")
+  endif()
+  string(REGEX MATCHALL "\\(NEEDED\\)[^[\n]*\\[[^]\n]+\\]" rows "${dump}")
+  set(unexpected)
+  foreach(row IN LISTS rows)
+    string(REGEX REPLACE ".*\\[([^]]+)\\]$" "\\1" name "${row}")
+    list(APPEND imports "${name}")
+    if(NOT name MATCHES "${allowed_imports}")
+      list(APPEND unexpected "${name}")
+    endif()
+  endforeach()
+  if(unexpected)
+    list(JOIN unexpected ", " unexpected)
+    message(FATAL_ERROR "${library_name} depends on libraries a host would have to ship as well: ${unexpected}")
+  endif()
+  if(KIMODO_TARGET STREQUAL "android")
+    # Android 15 devices with 16 KB pages refuse a library whose segments are
+    # aligned to less (ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES).
+    execute_process(COMMAND "${KIMODO_READELF}" -lW "${library}" OUTPUT_VARIABLE dump)
+    string(REGEX MATCHALL "\n *LOAD[^\n]*" rows "${dump}")
+    if(NOT rows)
+      message(FATAL_ERROR "readelf -l found no LOAD segments in ${library_name}")
+    endif()
+    foreach(row IN LISTS rows)
+      string(REGEX REPLACE ".* 0x([0-9a-fA-F]+)[ \r]*$" "\\1" align "${row}")
+      math(EXPR align "0x${align}")
+      if(align LESS 16384)
+        message(FATAL_ERROR "${library_name} has a segment aligned to ${align} bytes; 16 KB pages need 16384")
+      endif()
+    endforeach()
+    message(STATUS "${library_name} is aligned for 16 KB pages")
+  endif()
+  # The newest glibc symbol version it needs: the oldest glibc it runs on.
+  execute_process(COMMAND "${KIMODO_READELF}" -V "${library}" OUTPUT_VARIABLE dump)
+  string(REGEX MATCHALL "GLIBC_[0-9]+\\.[0-9]+" versions "${dump}")
+  foreach(version IN LISTS versions)
+    string(REPLACE "GLIBC_" "" version "${version}")
+    if(glibc STREQUAL "" OR version VERSION_GREATER glibc)
+      set(glibc "${version}")
+    endif()
+  endforeach()
+  message(STATUS "${library_name} exports ${export_count} kimodo_* functions and nothing else")
+  list(JOIN imports ", " import_text)
+  message(STATUS "${library_name} needs ${import_text}")
+  if(glibc)
+    message(STATUS "${library_name} needs glibc ${glibc} or later")
+  endif()
+endif()
+
 # Start clean, except for the weights, which are copied only when they
 # change, and WEIGHTS.md, which describes them.
 file(MAKE_DIRECTORY "${out}")
@@ -182,6 +304,23 @@ foreach(binary source IN ZIP_LISTS binaries sources)
   get_filename_component(folder "${out}/${binary}" DIRECTORY)
   file(COPY "${source}" DESTINATION "${folder}")
 endforeach()
+if(strip_library)
+  # The copy an app ships, without the symbols (the NDK builds with debug
+  # information even for release); the symbols/ copy reads crash reports.
+  if(NOT KIMODO_STRIP)
+    find_program(KIMODO_STRIP NAMES llvm-strip strip)
+  endif()
+  if(NOT KIMODO_STRIP)
+    message(FATAL_ERROR "llvm-strip is needed to package ${KIMODO_TARGET}: pass -DKIMODO_STRIP=<the NDK's llvm-strip>")
+  endif()
+  get_filename_component(folder "${out}/${strip_library}" DIRECTORY)
+  file(MAKE_DIRECTORY "${folder}")
+  list(GET sources 0 unstripped)
+  execute_process(COMMAND "${KIMODO_STRIP}" --strip-unneeded -o "${out}/${strip_library}" "${unstripped}" RESULT_VARIABLE result)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "${KIMODO_STRIP} failed on ${unstripped}")
+  endif()
+endif()
 file(COPY "${src}/include/kimodo/kimodo_capi.h" DESTINATION "${out}/include/kimodo")
 
 # ---- Licences --------------------------------------------------------------
@@ -195,6 +334,9 @@ endif()
 if(KIMODO_BUILD_POSTPROCESS)
   file(COPY_FILE "${src}/third_party/motion_correction/LICENSE" "${out}/licenses/MotionCorrection-LICENSE")
   file(COPY_FILE "${src}/eigen/COPYING.MPL2" "${out}/licenses/Eigen-COPYING.MPL2")
+  if(KIMODO_BUILD_POSTPROCESS_SIMD STREQUAL "neon")
+    file(COPY_FILE "${src}/third_party/sse2neon/LICENSE" "${out}/licenses/sse2neon-LICENSE")
+  endif()
 endif()
 
 # ---- VERSION.json ----------------------------------------------------------
@@ -224,6 +366,10 @@ string(TIMESTAMP built "%Y-%m-%dT%H:%M:%SZ" UTC)
 json_array(backends_json ${KIMODO_BUILD_BACKENDS})
 json_array(cpu_json ${KIMODO_BUILD_CPU_FEATURES})
 json_array(imports_json ${imports})
+set(glibc_json "")
+if(glibc)
+  set(glibc_json ",\n  \"glibc\": \"${glibc}\"")
+endif()
 file(WRITE "${out}/VERSION.json" "{
   \"target\": \"${KIMODO_TARGET}\",
   \"abi\": ${abi},
@@ -239,7 +385,7 @@ file(WRITE "${out}/VERSION.json" "{
   \"ggml\": {\"version\": \"${KIMODO_BUILD_GGML_VERSION}\", \"commit\": \"${KIMODO_BUILD_GGML_COMMIT}\"},
   \"backends\": ${backends_json},
   \"post_processing\": ${postprocess},
-  \"imports\": ${imports_json}
+  \"imports\": ${imports_json}${glibc_json}
 }
 ")
 
@@ -251,7 +397,12 @@ if(NOT KIMODO_WEIGHTS)
 endif()
 
 file(GLOB motion_models "${KIMODO_WEIGHTS_DIR}/models/kimodo-*.gguf")
-file(GLOB text_models "${KIMODO_WEIGHTS_DIR}/Llama-3-Kimodo-*.gguf")
+set(text_models)
+if(KIMODO_TEXT_WEIGHTS)
+  file(GLOB text_models "${KIMODO_WEIGHTS_DIR}/Llama-3-Kimodo-*.gguf")
+else()
+  message(STATUS "Text encoder left out (KIMODO_TEXT_WEIGHTS=OFF): generation takes embeddings made elsewhere")
+endif()
 set(weights)
 foreach(file IN LISTS motion_models text_models)
   get_filename_component(name "${file}" NAME)
@@ -262,15 +413,19 @@ foreach(file IN LISTS motion_models text_models)
     list(APPEND weights "${file}")
   endif()
 endforeach()
-list(APPEND weights "${KIMODO_WEIGHTS_DIR}/tokenizer.gguf")
+set(required models/kimodo-soma-seed-v1.1-f32.gguf)
+if(KIMODO_TEXT_WEIGHTS)
+  list(APPEND weights "${KIMODO_WEIGHTS_DIR}/tokenizer.gguf")
+  list(APPEND required tokenizer.gguf)
+endif()
 
 set(missing)
-foreach(name models/kimodo-soma-seed-v1.1-f32.gguf tokenizer.gguf)
+foreach(name IN LISTS required)
   if(NOT EXISTS "${KIMODO_WEIGHTS_DIR}/${name}")
     list(APPEND missing "${name}")
   endif()
 endforeach()
-if(NOT text_models)
+if(KIMODO_TEXT_WEIGHTS AND NOT text_models)
   list(APPEND missing "Llama-3-Kimodo-<quantization>.gguf")
 endif()
 if(missing)
@@ -353,14 +508,21 @@ endforeach()
 
 list(JOIN rows "\n" rows)
 human_size("${total}" total_shown)
+if(KIMODO_TEXT_WEIGHTS)
+  set(use "The library loads a motion model and a text encoder, and reads
+`tokenizer.gguf` from the text encoder's folder.  Keep them together.")
+else()
+  set(use "Motion models only: the text encoder (8 GB) does not fit beside an app on
+this target.  Generation takes 4096-value prompt embeddings made where the
+text encoder runs (`kimodo_encode_text`), through `kimodo_generate_embedding`.")
+endif()
 file(WRITE "${out}/WEIGHTS.md" "# Weights
 
 The files in `weights/`, ${total_shown} in all, copied from a local cache
 on ${built}.  They are data, not code, and each keeps its own terms: read
 the model cards before sharing them outside the team.
 
-The library loads a motion model and a text encoder, and reads
-`tokenizer.gguf` from the text encoder's folder.  Keep them together.
+${use}
 
 | File | Size | SHA-256 | Source | Terms |
 |---|---|---|---|---|

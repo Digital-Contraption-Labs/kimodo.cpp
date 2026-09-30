@@ -1,3 +1,5 @@
 # cmd.exe mis-parses labels and goto in LF-only batch files.
 *.bat text eol=crlf
 *.cmd text eol=crlf
+# Shell scripts run in Linux, macOS and WSL, which need LF.
+*.sh text eol=lf

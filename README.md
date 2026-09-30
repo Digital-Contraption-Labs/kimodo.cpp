@@ -125,7 +125,11 @@ talking to the server, `scripts\build\build_library_windows.bat` builds
 `include/kimodo/kimodo_capi.h`), checks its exports and dependencies, and
 packages it with the header, licences, `VERSION.json` and the weights from
 the local cache into `dist\kimodo-windows`. `scripts\build\stage_to_cf.bat
---cf <folder>` copies that package into ContraptionFabricator. The plan for
+--cf <folder>` copies that package into ContraptionFabricator.
+`build_library_linux.sh` (or `.bat`, through WSL) and `build_library_android`
+(`.bat` or `.sh`, with the NDK) build the Linux and Android packages the same
+way; the Linux and Android builds compile against the pinned `vulkan-headers`
+and `spirv-headers` submodules. The plan for
 the library and its other platforms is in
 [`docs/SHARED_LIBRARY_PLAN.md`](docs/SHARED_LIBRARY_PLAN.md).
 

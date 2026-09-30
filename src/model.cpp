@@ -154,7 +154,7 @@ std::expected<std::unique_ptr<conditions>, std::string> build_conditions(
         out->targets = detail::build_postprocess_targets(skeleton, *constraints, frames);
         out->post = {&out->targets, options.root_margin};
 #else
-        return std::unexpected("this build has no post-processing (it needs x86 and the eigen submodule)");
+        return std::unexpected("this build has no post-processing (it needs x86 or ARM64, and the eigen submodule)");
 #endif
     }
     return out;
